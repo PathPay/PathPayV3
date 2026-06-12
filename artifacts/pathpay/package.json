@@ -75,6 +75,8 @@
     "zod": "catalog:"
   },
   "dependencies": {
+    "@circle-fin/adapter-viem-v2": "^1.11.2",
+    "@circle-fin/app-kit": "^1.7.0",
     "viem": "^2.52.2",
     "wagmi": "^3.6.16"
   }
