@@ -18,16 +18,26 @@ import { formatUnits } from "viem";
 
 const queryClient = new QueryClient();
 
-const terminalSequence = [
+const STAGED_LOGS = [
   "> Initializing PathPay routing engine...",
-  "> Detecting merchant gateway: Stripe US (detected)",
-  "> Analyzing BIN database for issuer compatibility...",
-  "> Bypassing BIN block: 423456 → reassigning to Arc-US-01",
-  "> Generating virtual card credentials via Arc Network...",
-  "> Assigning US billing address: 215 E 68th St, New York, NY 10065",
-  "> Card issued successfully. CVV randomized. Expiry: 08/27",
-  "> Routing confirmed via Arc Network. Transaction ready.",
+  "> Contacting AI Routing Copilot...",
+  "> Analyzing merchant processor fingerprint...",
+  "> Scanning BIN database for issuer restrictions...",
+  "> Evaluating Arc Network rail compatibility...",
 ];
+
+type RoutingResult = {
+  processor: string;
+  detected_block: string;
+  recommended_rail: string;
+  reason: string;
+  mock_billing_address: {
+    street: string;
+    city: string;
+    state: string;
+    zip: string;
+  };
+};
 
 function truncateAddress(addr: string) {
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
@@ -367,27 +377,70 @@ function Home() {
   const [terminalLines, setTerminalLines] = useState<string[]>([]);
   const [cardReady, setCardReady] = useState(false);
   const [showCvv, setShowCvv] = useState(false);
+  const [routingResult, setRoutingResult] = useState<RoutingResult | null>(null);
+  const [routingError, setRoutingError] = useState<string | null>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
 
-  const startTerminalSequence = () => {
+  const appendLine = (line: string) =>
+    setTerminalLines((prev) => [...prev, line]);
+
+  const startTerminalSequence = async () => {
     if (!merchant || !amount) return;
     setIsGenerating(true);
     setTerminalLines([]);
     setCardReady(false);
+    setRoutingResult(null);
+    setRoutingError(null);
 
-    let currentLine = 0;
-    const interval = setInterval(() => {
-      if (currentLine < terminalSequence.length) {
-        setTerminalLines((prev) => [...prev, terminalSequence[currentLine]]);
-        currentLine++;
-      } else {
-        clearInterval(interval);
-        setTimeout(() => {
-          setIsGenerating(false);
-          setCardReady(true);
-        }, 500);
+    // Show staged loading logs with 1s delay between each
+    for (const log of STAGED_LOGS) {
+      appendLine(log);
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+
+    // Call the real AI routing API
+    let result: RoutingResult;
+    try {
+      const resp = await fetch("/api/copilot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ merchantUrl: merchant, amount }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ error: "Unknown error" }));
+        throw new Error(err.error ?? "API error");
       }
-    }, 400);
+      result = await resp.json();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "AI routing engine unavailable";
+      appendLine(`> ERROR: ${msg}`);
+      setRoutingError(msg);
+      setIsGenerating(false);
+      return;
+    }
+
+    // Print AI-returned dynamic logs
+    appendLine(`> Processor detected: ${result.processor}`);
+    await new Promise((r) => setTimeout(r, 800));
+    if (result.detected_block && result.detected_block !== "None detected") {
+      appendLine(`> BIN block detected: ${result.detected_block}`);
+      await new Promise((r) => setTimeout(r, 800));
+      appendLine(`> Bypassing block → rerouting via ${result.recommended_rail}...`);
+      await new Promise((r) => setTimeout(r, 800));
+    }
+    appendLine(`> Generating virtual card credentials via Arc Network...`);
+    await new Promise((r) => setTimeout(r, 800));
+    appendLine(
+      `> Assigning billing address: ${result.mock_billing_address.street}, ${result.mock_billing_address.city}, ${result.mock_billing_address.state}`
+    );
+    await new Promise((r) => setTimeout(r, 800));
+    appendLine(`> Card issued successfully. CVV randomized. Expiry: 08/27`);
+    await new Promise((r) => setTimeout(r, 600));
+    appendLine(`> Routing confirmed via ${result.recommended_rail}. Transaction ready.`);
+
+    setRoutingResult(result);
+    setIsGenerating(false);
+    setCardReady(true);
   };
 
   useEffect(() => {
@@ -486,7 +539,7 @@ function Home() {
                     {isGenerating && <span className="ml-2 w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />}
                   </Button>
 
-                  {cardReady && (
+                  {(cardReady || routingError) && (
                     <Button
                       variant="ghost"
                       className="w-full text-muted-foreground text-xs mt-2 hover:text-foreground h-8"
@@ -495,6 +548,8 @@ function Home() {
                         setMerchant("");
                         setAmount("");
                         setTerminalLines([]);
+                        setRoutingResult(null);
+                        setRoutingError(null);
                       }}
                     >
                       Reset &amp; Create Another
@@ -582,20 +637,55 @@ function Home() {
                 </div>
 
                 <div className="max-w-[420px] mx-auto mt-4 space-y-3">
-                  <div className="bg-card border border-border/50 rounded-lg p-3 flex justify-between items-center group hover:border-primary/30 transition-colors">
-                    <div className="space-y-1 overflow-hidden">
-                      <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">Billing Address</div>
-                      <div className="font-mono text-xs text-foreground truncate">215 E 68th St, New York, NY 10065, US</div>
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 text-muted-foreground group-hover:text-primary transition-colors shrink-0"
-                      onClick={() => navigator.clipboard.writeText("215 E 68th St, New York, NY 10065, US")}
-                    >
-                      <Copy className="w-4 h-4" />
-                    </Button>
-                  </div>
+                  {routingResult && (
+                    <>
+                      {/* Billing Address */}
+                      <div className="bg-card border border-border/50 rounded-lg p-3 flex justify-between items-center group hover:border-primary/30 transition-colors">
+                        <div className="space-y-1 overflow-hidden">
+                          <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">Billing Address</div>
+                          <div className="font-mono text-xs text-foreground">
+                            {routingResult.mock_billing_address.street}, {routingResult.mock_billing_address.city}, {routingResult.mock_billing_address.state} {routingResult.mock_billing_address.zip}, US
+                          </div>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-muted-foreground group-hover:text-primary transition-colors shrink-0"
+                          onClick={() => navigator.clipboard.writeText(
+                            `${routingResult.mock_billing_address.street}, ${routingResult.mock_billing_address.city}, ${routingResult.mock_billing_address.state} ${routingResult.mock_billing_address.zip}, US`
+                          )}
+                        >
+                          <Copy className="w-4 h-4" />
+                        </Button>
+                      </div>
+
+                      {/* AI Routing Summary */}
+                      <div className="bg-card border border-primary/20 rounded-lg p-4 space-y-3">
+                        <div className="text-[10px] font-mono text-primary uppercase tracking-widest flex items-center gap-1.5">
+                          <Cpu className="w-3 h-3" /> AI Routing Analysis
+                        </div>
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-2 font-mono text-xs">
+                          <div>
+                            <span className="text-muted-foreground">Processor</span>
+                            <p className="text-foreground mt-0.5">{routingResult.processor}</p>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Rail</span>
+                            <p className="text-primary mt-0.5">{routingResult.recommended_rail}</p>
+                          </div>
+                          <div className="col-span-2">
+                            <span className="text-muted-foreground">Block Detected</span>
+                            <p className={`mt-0.5 ${routingResult.detected_block === "None detected" ? "text-muted-foreground/60" : "text-amber-400"}`}>
+                              {routingResult.detected_block}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="border-t border-border/40 pt-3 font-mono text-xs text-muted-foreground leading-relaxed italic">
+                          {routingResult.reason}
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
             </div>
