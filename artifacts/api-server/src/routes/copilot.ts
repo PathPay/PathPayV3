@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { z } from "zod";
 
 const router: IRouter = Router();
@@ -23,9 +23,16 @@ const RoutingResultSchema = z.object({
 });
 
 function getClient() {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not set");
-  return new Anthropic({ apiKey });
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error("OPENROUTER_API_KEY is not set");
+  return new OpenAI({
+    baseURL: "https://openrouter.ai/api/v1",
+    apiKey,
+    defaultHeaders: {
+      "HTTP-Referer": "https://pathpay.replit.app",
+      "X-Title": "PathPay",
+    },
+  });
 }
 
 router.post("/copilot", async (req, res): Promise<void> => {
@@ -41,13 +48,13 @@ router.post("/copilot", async (req, res): Promise<void> => {
 Your job is to analyze a merchant's payment processor setup and return optimal routing instructions for USDC payments via the Arc Network.
 
 Rules:
-- If the merchant URL contains "liquidation.com" or "Liquidation.com", you MUST detect "Stripe US" as the processor and simulate a BIN block being bypassed.
+- If the merchant URL contains "liquidation.com", detect "Stripe US" as the processor and simulate a BIN block being bypassed.
 - Assign a realistic US billing address. Vary addresses — do not always use the same one.
 - The recommended_rail should always be "Arc Network (CCTPv2)".
 - The reason should be a 1-2 sentence technical explanation of why this routing was chosen.
 - detected_block: if a BIN block is detected, describe it (e.g. "BIN 423456 blocked by Stripe US issuer policy"). If none, use "None detected".
 
-You must respond ONLY with a valid JSON object matching this schema exactly — no prose, no markdown, no extra fields:
+You MUST respond with ONLY a valid JSON object — no prose, no markdown fences, no extra fields:
 {
   "processor": "string",
   "detected_block": "string",
@@ -66,58 +73,46 @@ Merchant: ${merchantUrl}
 Amount: ${amount} USDC`;
 
   try {
-    const anthropic = getClient();
-    const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 8192,
-      system: systemPrompt,
-      messages: [{ role: "user", content: userMessage }],
-      tools: [
-        {
-          name: "routing_result",
-          description: "Return the payment routing analysis result as structured JSON",
-          input_schema: {
-            type: "object" as const,
-            properties: {
-              processor: { type: "string", description: "Detected payment processor (e.g. Stripe US, Adyen, Braintree)" },
-              detected_block: { type: "string", description: "BIN block or restriction detected, or 'None detected'" },
-              recommended_rail: { type: "string", description: "Recommended payment rail" },
-              reason: { type: "string", description: "1-2 sentence technical explanation of the routing decision" },
-              mock_billing_address: {
-                type: "object",
-                properties: {
-                  street: { type: "string" },
-                  city: { type: "string" },
-                  state: { type: "string" },
-                  zip: { type: "string" },
-                },
-                required: ["street", "city", "state", "zip"],
-              },
-            },
-            required: ["processor", "detected_block", "recommended_rail", "reason", "mock_billing_address"],
-          },
-        },
+    const client = getClient();
+    const completion = await client.chat.completions.create({
+      model: "anthropic/claude-sonnet-4-5",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage },
       ],
-      tool_choice: { type: "tool", name: "routing_result" },
+      response_format: { type: "json_object" },
+      max_tokens: 1024,
     });
 
-    const toolUse = message.content.find((block) => block.type === "tool_use");
-    if (!toolUse || toolUse.type !== "tool_use") {
-      req.log.error("No tool_use block in Anthropic response");
-      res.status(500).json({ error: "AI did not return a structured result" });
+    const raw = completion.choices[0]?.message?.content;
+    if (!raw) {
+      req.log.error("Empty response from OpenRouter");
+      res.status(500).json({ error: "AI returned an empty response" });
       return;
     }
 
-    const validated = RoutingResultSchema.safeParse(toolUse.input);
+    // Strip markdown code fences if the model wraps the JSON
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch {
+      req.log.error({ raw }, "Failed to parse JSON from OpenRouter");
+      res.status(500).json({ error: "AI returned malformed JSON" });
+      return;
+    }
+
+    const validated = RoutingResultSchema.safeParse(parsed);
     if (!validated.success) {
-      req.log.error({ errors: validated.error.message }, "Anthropic result failed schema validation");
+      req.log.error({ errors: validated.error.message }, "OpenRouter result failed schema validation");
       res.status(500).json({ error: "AI returned malformed routing data" });
       return;
     }
 
     res.json(validated.data);
   } catch (err) {
-    req.log.error({ err }, "Anthropic API call failed");
+    req.log.error({ err }, "OpenRouter API call failed");
     res.status(500).json({ error: "AI routing engine unavailable" });
   }
 });
