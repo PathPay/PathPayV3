@@ -72,4 +72,7 @@ export default defineConfig({
     host: "0.0.0.0",
     allowedHosts: true,
   },
+  define: {
+    "import.meta.env.VITE_PRIVY_APP_ID": JSON.stringify(process.env.PRIVY_APP_ID ?? ""),
+  },
 });

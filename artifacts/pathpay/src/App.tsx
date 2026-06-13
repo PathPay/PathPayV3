@@ -1,13 +1,14 @@
 import { Switch, Route, Router as WouterRouter } from "wouter";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { WagmiProvider, useAccount, useConnect, useDisconnect, useBalance, useSignMessage } from "wagmi";
+import { WagmiProvider, useAccount, useBalance, useSignMessage } from "wagmi";
+import { PrivyProvider, usePrivy, useWallets } from "@privy-io/react-auth";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import { useEffect, useState, useRef } from "react";
 import {
-  Wallet, CreditCard, Eye, EyeOff, Copy, ArrowRight,
-  Cpu, Activity, ShieldCheck, CheckCircle2, LogOut, ChevronRight, AlertCircle, Loader2
+  Wallet, Eye, EyeOff, Copy, ArrowRight,
+  Cpu, Activity, ShieldCheck, CheckCircle2, LogOut, ChevronRight, AlertCircle, Loader2, Mail
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -43,52 +44,78 @@ function truncateAddress(addr: string) {
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 }
 
-function WalletHeaderSection() {
-  const { address, isConnected, chain } = useAccount();
-  const { connect, connectors, isPending } = useConnect();
-  const { disconnect } = useDisconnect();
+function PrivyHeaderSection() {
+  const { ready, authenticated, user, login, logout } = usePrivy();
+  const { wallets } = useWallets();
+
+  const wallet = wallets[0];
+  const address = wallet?.address;
+  const email = user?.email?.address;
+  const displayIdentity = address ? truncateAddress(address) : email ?? null;
+
   const { data: balance, isLoading: balanceLoading } = useBalance({
-    address,
+    address: address as `0x${string}` | undefined,
     chainId: arcTestnet.id,
+    query: { enabled: !!address },
   });
 
   const formattedBalance = balance
     ? `${parseFloat(formatUnits(balance.value, balance.decimals)).toFixed(2)} ${balance.symbol}`
     : null;
 
-  if (isConnected && address) {
+  if (!ready) {
+    return (
+      <div className="flex items-center gap-2">
+        <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  if (authenticated && displayIdentity) {
     return (
       <div className="flex items-center gap-4">
         <div className="hidden md:flex flex-col items-end mr-2">
           <span className="text-xs font-mono text-muted-foreground uppercase tracking-widest flex items-center gap-1">
-            <Activity className="w-3 h-3 text-primary" /> Active Wallet
+            <Activity className="w-3 h-3 text-primary" />
+            {address ? "Active Wallet" : "Signed In"}
           </span>
           <div className="flex items-center gap-2">
-            <span className="font-mono font-medium text-base">
-              {balanceLoading ? (
-                <span className="text-muted-foreground text-sm">Loading...</span>
-              ) : formattedBalance ? (
-                formattedBalance
-              ) : (
-                <span className="text-muted-foreground text-sm">—</span>
-              )}
-            </span>
-            <Badge variant="outline" className="h-5 px-1.5 text-[10px] font-mono rounded bg-primary/10 text-primary border-primary/20">
-              {chain?.name ?? "ARC NET"}
-            </Badge>
+            {address ? (
+              <>
+                <span className="font-mono font-medium text-base">
+                  {balanceLoading ? (
+                    <span className="text-muted-foreground text-sm">Loading...</span>
+                  ) : formattedBalance ? (
+                    formattedBalance
+                  ) : (
+                    <span className="text-muted-foreground text-sm">—</span>
+                  )}
+                </span>
+                <Badge variant="outline" className="h-5 px-1.5 text-[10px] font-mono rounded bg-primary/10 text-primary border-primary/20">
+                  ARC NET
+                </Badge>
+              </>
+            ) : (
+              <span className="font-mono text-sm text-muted-foreground">{email}</span>
+            )}
           </div>
         </div>
 
         <div className="flex items-center gap-2">
-          <div className="border border-primary/30 bg-primary/5 rounded-md px-3 py-1.5 font-mono text-xs text-primary hidden sm:block">
-            {truncateAddress(address)}
+          <div className="border border-primary/30 bg-primary/5 rounded-md px-3 py-1.5 font-mono text-xs text-primary hidden sm:flex items-center gap-1.5">
+            {address ? (
+              <Wallet className="w-3 h-3" />
+            ) : (
+              <Mail className="w-3 h-3" />
+            )}
+            {displayIdentity}
           </div>
           <Button
             variant="outline"
             size="icon"
             className="border-border/50 text-muted-foreground hover:text-destructive hover:border-destructive/50 h-9 w-9"
-            onClick={() => disconnect()}
-            title="Disconnect wallet"
+            onClick={logout}
+            title="Sign out"
           >
             <LogOut className="w-4 h-4" />
           </Button>
@@ -97,13 +124,11 @@ function WalletHeaderSection() {
     );
   }
 
-  const injectedConnector = connectors.find((c) => c.type === "injected");
-
   return (
     <div className="flex items-center gap-4">
       <div className="hidden md:flex flex-col items-end mr-4">
         <span className="text-xs font-mono text-muted-foreground uppercase tracking-widest flex items-center gap-1">
-          <Activity className="w-3 h-3 text-muted-foreground/50" /> No Wallet
+          <Activity className="w-3 h-3 text-muted-foreground/50" /> Not Signed In
         </span>
         <div className="flex items-center gap-2">
           <span className="font-mono font-medium text-lg text-muted-foreground">—</span>
@@ -116,15 +141,10 @@ function WalletHeaderSection() {
       <Button
         variant="outline"
         className="border-border/50 text-foreground/80 hover:text-foreground hover:border-primary/40 font-mono uppercase tracking-wider text-xs"
-        onClick={() => injectedConnector && connect({ connector: injectedConnector })}
-        disabled={isPending || !injectedConnector}
+        onClick={login}
       >
-        {isPending ? (
-          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-        ) : (
-          <Wallet className="w-4 h-4 mr-2" />
-        )}
-        {isPending ? "Connecting..." : injectedConnector ? "Connect" : "No Wallet Found"}
+        <Wallet className="w-4 h-4 mr-2" />
+        Sign In
       </Button>
     </div>
   );
@@ -458,7 +478,7 @@ function Home() {
           </div>
           <span className="font-bold text-lg tracking-tight hidden sm:inline-block">PathPay</span>
         </div>
-        <WalletHeaderSection />
+        <PrivyHeaderSection />
       </header>
 
       <main className="flex-1 w-full max-w-4xl mx-auto px-4 py-8 md:py-12 flex flex-col">
@@ -712,16 +732,34 @@ function Router() {
 
 function App() {
   return (
-    <WagmiProvider config={wagmiConfig}>
-      <QueryClientProvider client={queryClient}>
-        <TooltipProvider>
-          <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
-            <Router />
-          </WouterRouter>
-          <Toaster />
-        </TooltipProvider>
-      </QueryClientProvider>
-    </WagmiProvider>
+    <PrivyProvider
+      appId={import.meta.env.VITE_PRIVY_APP_ID}
+      config={{
+        loginMethods: ["email", "wallet", "google"],
+        appearance: {
+          theme: "dark",
+          accentColor: "#22c55e",
+          logo: undefined,
+          landingHeader: "Sign in to PathPay",
+          loginMessage: "Connect your wallet or sign in with email to get started.",
+          showWalletLoginFirst: true,
+        },
+        embeddedWallets: {
+          createOnLogin: "users-without-wallets",
+        },
+      }}
+    >
+      <WagmiProvider config={wagmiConfig}>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+              <Router />
+            </WouterRouter>
+            <Toaster />
+          </TooltipProvider>
+        </QueryClientProvider>
+      </WagmiProvider>
+    </PrivyProvider>
   );
 }
 
