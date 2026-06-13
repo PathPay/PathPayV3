@@ -77,6 +77,8 @@
   "dependencies": {
     "@circle-fin/adapter-viem-v2": "^1.11.2",
     "@circle-fin/app-kit": "^1.7.0",
+    "@privy-io/react-auth": "^3.29.2",
+    "@supabase/supabase-js": "^2.108.1",
     "viem": "^2.52.2",
     "wagmi": "^3.6.16"
   }
