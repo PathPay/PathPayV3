@@ -1,6 +1,6 @@
 import { Switch, Route, Router as WouterRouter } from "wouter";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { WagmiProvider, useAccount, useBalance, useSignMessage } from "wagmi";
+import { WagmiProvider, useBalance } from "wagmi";
 import { PrivyProvider, usePrivy, useWallets } from "@privy-io/react-auth";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -8,36 +8,40 @@ import NotFound from "@/pages/not-found";
 import { useEffect, useState, useRef } from "react";
 import {
   Wallet, Eye, EyeOff, Copy, ArrowRight,
-  Cpu, Activity, ShieldCheck, CheckCircle2, LogOut, ChevronRight, AlertCircle, Loader2, Mail
+  Cpu, Activity, ShieldCheck, CheckCircle2, LogOut,
+  ChevronRight, AlertCircle, Loader2, Mail, Zap, CreditCard, RefreshCw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { wagmiConfig, arcTestnet } from "@/lib/web3";
-import { formatUnits } from "viem";
+import { mantleSepolia } from "@/lib/chains";
+import { getRoutingDecision, type RoutingDecision } from "@/lib/routing-engine";
+import { parseUnits, formatUnits } from "viem";
 
 const queryClient = new QueryClient();
 
 const STAGED_LOGS = [
   "> Initializing PathPay routing engine...",
-  "> Contacting AI Routing Copilot...",
-  "> Analyzing merchant processor fingerprint...",
-  "> Scanning BIN database for issuer restrictions...",
-  "> Evaluating Arc Network rail compatibility...",
+  "> Scanning merchant fingerprint...",
+  "> Querying AI routing intelligence...",
+  "> Analyzing BIN compatibility matrix...",
+  "> Evaluating payment rail options...",
 ];
 
-type RoutingResult = {
-  processor: string;
-  detected_block: string;
-  recommended_rail: string;
-  reason: string;
-  mock_billing_address: {
-    street: string;
-    city: string;
-    state: string;
-    zip: string;
-  };
+const RAIL_LABELS: Record<string, string> = {
+  stablecoin_direct: "Stablecoin Direct (Mantle)",
+  virtual_card_stripe: "Virtual Card — Stripe BIN",
+  virtual_card_lithic: "Virtual Card — Lithic BIN",
+  p2p_corridor: "P2P Corridor",
+};
+
+const RAIL_STYLES: Record<string, string> = {
+  stablecoin_direct: "bg-green-500/10 text-green-400 border-green-500/30",
+  virtual_card_stripe: "bg-blue-500/10 text-blue-400 border-blue-500/30",
+  virtual_card_lithic: "bg-purple-500/10 text-purple-400 border-purple-500/30",
+  p2p_corridor: "bg-yellow-500/10 text-yellow-400 border-yellow-500/30",
 };
 
 function truncateAddress(addr: string) {
@@ -96,18 +100,14 @@ function PrivyHeaderSection() {
                 </Badge>
               </>
             ) : (
-              <span className="font-mono text-sm text-muted-foreground">{email}</span>
+              <span className="font-mono text-sm text-muted-foreground truncate max-w-[160px]">{email}</span>
             )}
           </div>
         </div>
 
         <div className="flex items-center gap-2">
           <div className="border border-primary/30 bg-primary/5 rounded-md px-3 py-1.5 font-mono text-xs text-primary hidden sm:flex items-center gap-1.5">
-            {address ? (
-              <Wallet className="w-3 h-3" />
-            ) : (
-              <Mail className="w-3 h-3" />
-            )}
+            {address ? <Wallet className="w-3 h-3" /> : <Mail className="w-3 h-3" />}
             {displayIdentity}
           </div>
           <Button
@@ -137,7 +137,6 @@ function PrivyHeaderSection() {
           </Badge>
         </div>
       </div>
-
       <Button
         variant="outline"
         className="border-border/50 text-foreground/80 hover:text-foreground hover:border-primary/40 font-mono uppercase tracking-wider text-xs"
@@ -150,246 +149,160 @@ function PrivyHeaderSection() {
   );
 }
 
-type ChatMessage = {
+type AgentMessage = {
   role: "ai" | "user";
-  content: React.ReactNode;
-  type?: "status" | "success" | "error";
+  content: string;
+  intent?: {
+    merchant: string;
+    amount_usdc: string;
+    recommended_rail: string;
+    contract_address: string;
+  } | null;
 };
 
-function SaasAutoPayTab() {
-  const { isConnected } = useAccount();
-  const { signMessage, isPending: isSigning, error: signError } = useSignMessage();
-
-  const [chatInput, setChatInput] = useState("");
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    {
-      role: "ai",
-      content: "Ready. Tell me which bill to pay — I'll handle the routing.",
-      type: "status",
-    },
+function SaasAgentTab() {
+  const { authenticated } = usePrivy();
+  const [messages, setMessages] = useState<AgentMessage[]>([
+    { role: "ai", content: "Ready. Tell me which subscription to pay — I'll route it automatically." },
   ]);
-  const [isChatLoading, setIsChatLoading] = useState(false);
-  const [awaitingSignature, setAwaitingSignature] = useState(false);
-  const chatBottomRef = useRef<HTMLDivElement>(null);
-  const pendingMessageRef = useRef<string>("");
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatMessages, isChatLoading, awaitingSignature]);
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
 
-  const executePayment = (userMsg: string) => {
-    setIsChatLoading(true);
-    setTimeout(() => {
-      const mockHash = "0x3f8a9d1c2e4b7f0a5d3c8e1b4f7a2d9e6c3b0f5a" + Math.floor(Math.random() * 9999).toString().padStart(4, "0");
-      const shortHash = `${mockHash.slice(0, 6)}...${mockHash.slice(-4)}`;
-      setChatMessages((prev) => [
+  const sendMessage = async () => {
+    if (!input.trim() || loading) return;
+    const userMsg = input.trim();
+    setInput("");
+    setMessages((prev) => [...prev, { role: "user", content: userMsg }]);
+    setLoading(true);
+
+    try {
+      const res = await fetch("/api/agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: userMsg }),
+      });
+      const data = await res.json();
+      setMessages((prev) => [
         ...prev,
         {
           role: "ai",
-          type: "success",
-          content: (
-            <div className="flex flex-col gap-3 font-mono text-sm leading-relaxed">
-              <div className="flex items-center gap-2 text-primary font-medium">
-                <CheckCircle2 className="w-4 h-4 shrink-0" />
-                <span>Payment routed successfully.</span>
-              </div>
-              <div className="pl-4 border-l-2 border-primary/30 py-1 space-y-2 text-muted-foreground">
-                <p className="text-foreground">Vercel Pro — $20.00 USDC deducted from Arc wallet</p>
-                <p>
-                  Transaction hash:{" "}
-                  <span className="text-primary/80 break-all">{mockHash.slice(0, 10)}...{mockHash.slice(-8)}</span>
-                </p>
-                <p className="text-xs opacity-70">
-                  Arc Network confirmed in 1.2s · Block #18,442,301
-                </p>
-              </div>
-            </div>
-          ),
+          content: data.response || "Unable to process request.",
+          intent: data.intent,
         },
       ]);
-      setIsChatLoading(false);
-      setAwaitingSignature(false);
-    }, 2200);
-  };
-
-  const handleChatSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!chatInput.trim() || isChatLoading || awaitingSignature) return;
-
-    const newMsg = chatInput.trim();
-    setChatInput("");
-    setChatMessages((prev) => [...prev, { role: "user", content: newMsg }]);
-    pendingMessageRef.current = newMsg;
-
-    if (!isConnected) {
-      setChatMessages((prev) => [
+    } catch {
+      setMessages((prev) => [
         ...prev,
-        {
-          role: "ai",
-          type: "error",
-          content: (
-            <div className="flex items-center gap-2 text-destructive font-mono text-sm">
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              <span>Connect your wallet first to authorize payments.</span>
-            </div>
-          ),
-        },
+        { role: "ai", content: "Failed to reach payment agent." },
       ]);
-      return;
+    } finally {
+      setLoading(false);
     }
-
-    setAwaitingSignature(true);
-    setChatMessages((prev) => [
-      ...prev,
-      {
-        role: "ai",
-        type: "status",
-        content: (
-          <div className="flex items-center gap-2 font-mono text-sm text-muted-foreground">
-            <Loader2 className="w-3 h-3 animate-spin shrink-0" />
-            <span>Requesting wallet signature to authorize payment...</span>
-          </div>
-        ),
-      },
-    ]);
-
-    signMessage(
-      {
-        message: `PathPay payment authorization:\n\n${newMsg}\n\nI authorize this payment from my Arc Network wallet.`,
-      },
-      {
-        onSuccess: () => {
-          setChatMessages((prev) => [
-            ...prev,
-            {
-              role: "ai",
-              type: "status",
-              content: (
-                <div className="flex items-center gap-2 font-mono text-sm text-primary/70">
-                  <ShieldCheck className="w-3 h-3 shrink-0" />
-                  <span>Signature verified. Routing payment via Arc Network...</span>
-                </div>
-              ),
-            },
-          ]);
-          executePayment(newMsg);
-        },
-        onError: (err) => {
-          setAwaitingSignature(false);
-          setChatMessages((prev) => [
-            ...prev,
-            {
-              role: "ai",
-              type: "error",
-              content: (
-                <div className="flex items-center gap-2 text-destructive font-mono text-sm">
-                  <AlertCircle className="w-4 h-4 shrink-0" />
-                  <span>
-                    {err.message.includes("User rejected")
-                      ? "Signature rejected. Payment cancelled."
-                      : `Signature failed: ${err.message.slice(0, 80)}`}
-                  </span>
-                </div>
-              ),
-            },
-          ]);
-        },
-      }
-    );
   };
+
+  if (!authenticated) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[400px] gap-4 text-center">
+        <AlertCircle className="w-8 h-8 text-muted-foreground" />
+        <div>
+          <p className="font-mono text-sm font-medium">Sign In Required</p>
+          <p className="text-muted-foreground text-xs mt-1">Authenticate to use the payment agent</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="w-full max-w-2xl bg-card border border-border/50 rounded-xl shadow-lg flex flex-col h-[600px] overflow-hidden">
-      <div className="px-4 py-3 border-b border-border/50 bg-background/50 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-full bg-primary/10 border border-primary/20 flex items-center justify-center text-primary">
-            <Cpu className="w-4 h-4" />
-          </div>
-          <div>
-            <h3 className="text-sm font-medium">PathPay AI</h3>
-            <p className="text-xs font-mono text-muted-foreground flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" /> Active
-            </p>
-          </div>
+    <div className="flex flex-col gap-4 w-full max-w-2xl mx-auto">
+      <div className="bg-card border border-border/50 rounded-xl p-4 flex items-center justify-between">
+        <div>
+          <p className="text-sm font-medium font-mono">Session Key</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Delegate payment authority to AI agent</p>
         </div>
-        {!isConnected && (
-          <Badge variant="outline" className="text-[10px] font-mono text-amber-500 border-amber-500/30 bg-amber-500/10">
-            Connect wallet to pay
-          </Badge>
-        )}
+        <Button size="sm" variant="outline" className="font-mono text-xs">Delegate</Button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {chatMessages.map((msg, i) => (
-          <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-            <div
-              className={`
-                max-w-[85%] rounded-lg px-4 py-3
-                ${msg.role === "user"
-                  ? "bg-[#1a1a1a] border border-[#2a2a2a] text-foreground"
-                  : msg.type === "status"
-                  ? "bg-transparent text-muted-foreground font-mono text-sm border-l-2 border-border/50 rounded-none pl-3"
-                  : msg.type === "error"
-                  ? "bg-destructive/5 border border-destructive/20 rounded-lg"
-                  : "bg-primary/5 border border-primary/20"
-                }
-              `}
-            >
-              {msg.content}
-            </div>
+      <div className="bg-[#0a0a0a] border border-[#1f1f1f] rounded-xl flex flex-col overflow-hidden">
+        <div className="flex items-center px-4 py-2 border-b border-[#1f1f1f] bg-[#0f0f0f]">
+          <div className="flex gap-1.5">
+            <div className="w-2.5 h-2.5 rounded-full bg-red-500/20 border border-red-500/50" />
+            <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/20 border border-yellow-500/50" />
+            <div className="w-2.5 h-2.5 rounded-full bg-green-500/20 border border-green-500/50" />
           </div>
-        ))}
-
-        {isChatLoading && (
-          <div className="flex justify-start">
-            <div className="font-mono text-xs text-muted-foreground flex items-center gap-2 pl-3 border-l-2 border-border/50">
-              PathPay is routing{" "}
-              <span className="flex gap-0.5">
-                <span className="animate-bounce" style={{ animationDelay: "0ms" }}>.</span>
-                <span className="animate-bounce" style={{ animationDelay: "150ms" }}>.</span>
-                <span className="animate-bounce" style={{ animationDelay: "300ms" }}>.</span>
-              </span>
+          <span className="mx-auto text-[10px] font-mono text-muted-foreground flex items-center gap-2">
+            <Cpu className="w-3 h-3" /> pathpay-saas-agent-v1.0
+          </span>
+        </div>
+        <div className="flex-1 p-4 space-y-3 overflow-y-auto min-h-64 max-h-80">
+          {messages.map((m, i) => (
+            <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+              <div className={`max-w-sm px-3 py-2 rounded-xl text-sm font-mono ${
+                m.role === "user"
+                  ? "bg-primary/20 text-primary border border-primary/30"
+                  : "bg-[#1a1a1a] text-foreground border border-[#2a2a2a]"
+              }`}>
+                {m.content}
+                {m.intent?.merchant && (
+                  <div className="mt-2 pt-2 border-t border-[#2a2a2a] text-[10px] text-muted-foreground space-y-0.5">
+                    <p>→ {m.intent.merchant} · ${m.intent.amount_usdc} USDC</p>
+                    <p className="text-primary/70">{RAIL_LABELS[m.intent.recommended_rail] ?? m.intent.recommended_rail}</p>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        )}
-        <div ref={chatBottomRef} />
+          ))}
+          {loading && (
+            <div className="flex justify-start">
+              <div className="bg-[#1a1a1a] border border-[#2a2a2a] px-3 py-2 rounded-xl text-sm font-mono text-muted-foreground flex items-center gap-2">
+                <span className="w-3 h-3 border border-primary border-t-transparent rounded-full animate-spin inline-block" />
+                Routing payment...
+              </div>
+            </div>
+          )}
+          <div ref={bottomRef} />
+        </div>
       </div>
 
-      <div className="p-4 bg-background/50 border-t border-border/50 shrink-0">
-        <form onSubmit={handleChatSubmit} className="relative flex items-center">
-          <ChevronRight className="absolute left-3 w-5 h-5 text-muted-foreground" />
-          <Input
-            value={chatInput}
-            onChange={(e) => setChatInput(e.target.value)}
-            placeholder="e.g. Pay my 20 USDC Vercel bill"
-            className="pl-10 pr-12 h-12 font-mono text-sm bg-card border-border hover:border-primary/30 focus-visible:ring-primary/30 transition-all rounded-lg"
-            disabled={isChatLoading || awaitingSignature}
-          />
-          <Button
-            type="submit"
-            size="icon"
-            className="absolute right-1.5 h-9 w-9 bg-primary/20 hover:bg-primary text-primary hover:text-primary-foreground transition-colors"
-            disabled={!chatInput.trim() || isChatLoading || awaitingSignature}
-          >
-            {awaitingSignature ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <ArrowRight className="w-4 h-4" />
-            )}
-          </Button>
-        </form>
-        <p className="text-center mt-3 text-[10px] font-mono text-muted-foreground/60 uppercase tracking-widest">
-          {isConnected ? "Wallet connected · Payments require signature" : "Connect wallet to authorize payments"}
-        </p>
+      <div className="flex gap-2">
+        <Input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+          placeholder='Try: "Pay my Vercel bill $20" or "Subscribe to Figma $15"'
+          className="font-mono text-sm bg-background/50 border-border/60 focus-visible:ring-primary/50"
+          disabled={loading}
+        />
+        <Button
+          onClick={sendMessage}
+          disabled={loading || !input.trim()}
+          className="font-mono uppercase tracking-wider text-xs bg-primary/10 hover:bg-primary/20 text-primary border border-primary/30 shrink-0"
+        >
+          {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ChevronRight className="w-4 h-4" />}
+        </Button>
       </div>
     </div>
   );
 }
 
+type VirtualCard = {
+  number: string;
+  expiry: string;
+  cvv: string;
+  billing_name: string;
+};
+
 function Home() {
   useEffect(() => {
     document.documentElement.classList.add("dark");
   }, []);
+
+  const { authenticated, getAccessToken } = usePrivy();
+  const { wallets } = useWallets();
 
   const [merchant, setMerchant] = useState("");
   const [amount, setAmount] = useState("");
@@ -397,8 +310,11 @@ function Home() {
   const [terminalLines, setTerminalLines] = useState<string[]>([]);
   const [cardReady, setCardReady] = useState(false);
   const [showCvv, setShowCvv] = useState(false);
-  const [routingResult, setRoutingResult] = useState<RoutingResult | null>(null);
+  const [routingResult, setRoutingResult] = useState<RoutingDecision | null>(null);
   const [routingError, setRoutingError] = useState<string | null>(null);
+  const [executeLoading, setExecuteLoading] = useState(false);
+  const [txHash, setTxHash] = useState<string | null>(null);
+  const [virtualCard, setVirtualCard] = useState<VirtualCard | null>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
 
   const appendLine = (line: string) =>
@@ -411,56 +327,97 @@ function Home() {
     setCardReady(false);
     setRoutingResult(null);
     setRoutingError(null);
+    setTxHash(null);
+    setVirtualCard(null);
 
-    // Show staged loading logs with 1s delay between each
     for (const log of STAGED_LOGS) {
       appendLine(log);
-      await new Promise((r) => setTimeout(r, 1000));
+      await new Promise((r) => setTimeout(r, 900));
     }
 
-    // Call the real AI routing API
-    let result: RoutingResult;
+    let result: RoutingDecision;
     try {
-      const resp = await fetch("/api/copilot", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ merchantUrl: merchant, amount }),
-      });
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: "Unknown error" }));
-        throw new Error(err.error ?? "API error");
-      }
-      result = await resp.json();
+      result = await getRoutingDecision(merchant, amount);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "AI routing engine unavailable";
+      const msg = err instanceof Error ? err.message : "Routing engine unavailable";
       appendLine(`> ERROR: ${msg}`);
       setRoutingError(msg);
       setIsGenerating(false);
       return;
     }
 
-    // Print AI-returned dynamic logs
-    appendLine(`> Processor detected: ${result.processor}`);
-    await new Promise((r) => setTimeout(r, 800));
-    if (result.detected_block && result.detected_block !== "None detected") {
-      appendLine(`> BIN block detected: ${result.detected_block}`);
-      await new Promise((r) => setTimeout(r, 800));
-      appendLine(`> Bypassing block → rerouting via ${result.recommended_rail}...`);
-      await new Promise((r) => setTimeout(r, 800));
+    appendLine(`> Processor: ${result.processor}`);
+    await new Promise((r) => setTimeout(r, 700));
+    appendLine(`> Rail: ${RAIL_LABELS[result.recommended_rail]} (${Math.round(result.confidence * 100)}% confidence)`);
+    await new Promise((r) => setTimeout(r, 700));
+    if (result.mock_billing_address) {
+      appendLine(`> Billing: ${result.mock_billing_address.street}, ${result.mock_billing_address.city}, ${result.mock_billing_address.state}`);
+      await new Promise((r) => setTimeout(r, 600));
     }
-    appendLine(`> Generating virtual card credentials via Arc Network...`);
-    await new Promise((r) => setTimeout(r, 800));
-    appendLine(
-      `> Assigning billing address: ${result.mock_billing_address.street}, ${result.mock_billing_address.city}, ${result.mock_billing_address.state}`
-    );
-    await new Promise((r) => setTimeout(r, 800));
-    appendLine(`> Card issued successfully. CVV randomized. Expiry: 08/27`);
-    await new Promise((r) => setTimeout(r, 600));
-    appendLine(`> Routing confirmed via ${result.recommended_rail}. Transaction ready.`);
+    appendLine(`> Route established. Ready to execute.`);
 
     setRoutingResult(result);
     setIsGenerating(false);
     setCardReady(true);
+  };
+
+  const executePayment = async () => {
+    if (!routingResult) return;
+    setExecuteLoading(true);
+    setTxHash(null);
+    setVirtualCard(null);
+    setRoutingError(null);
+
+    try {
+      if (routingResult.recommended_rail === "stablecoin_direct") {
+        const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
+        if (!embeddedWallet) throw new Error("No embedded wallet. Sign in with email first.");
+        await embeddedWallet.switchChain(mantleSepolia.id);
+        const provider = await embeddedWallet.getEthereumProvider();
+        const hash = await provider.request({
+          method: "eth_sendTransaction",
+          params: [{
+            from: embeddedWallet.address,
+            to: "0x000000000000000000000000000000000000dEaD",
+            value: "0x" + parseUnits("0.001", 18).toString(16),
+            chainId: "0x138B",
+          }],
+        });
+        setTxHash(hash as string);
+      } else {
+        const token = await getAccessToken();
+        const res = await fetch("/api/execute-payment", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            privyToken: token,
+            toAddress: "0x000000000000000000000000000000000000dEaD",
+            amount,
+            rail: routingResult.recommended_rail,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Payment failed");
+        if (data.card) setVirtualCard(data.card);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Payment failed";
+      setRoutingError(msg);
+    } finally {
+      setExecuteLoading(false);
+    }
+  };
+
+  const reset = () => {
+    setCardReady(false);
+    setMerchant("");
+    setAmount("");
+    setTerminalLines([]);
+    setRoutingResult(null);
+    setRoutingError(null);
+    setTxHash(null);
+    setVirtualCard(null);
+    setExecuteLoading(false);
   };
 
   useEffect(() => {
@@ -468,6 +425,9 @@ function Home() {
       terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
     }
   }, [terminalLines]);
+
+  const railStyle = routingResult ? (RAIL_STYLES[routingResult.recommended_rail] ?? "border-border/50 bg-card text-foreground") : "";
+  const isStablecoin = routingResult?.recommended_rail === "stablecoin_direct";
 
   return (
     <div className="min-h-[100dvh] w-full bg-background text-foreground font-sans flex flex-col selection:bg-primary/30">
@@ -502,12 +462,13 @@ function Home() {
 
           {/* TAB 1: PHYSICAL CHECKOUT */}
           <TabsContent value="physical" className="col-span-full grid grid-cols-1 lg:grid-cols-12 gap-8 m-0 p-0 outline-none">
+            {/* Left column */}
             <div className="lg:col-span-5 flex flex-col gap-6">
               <div className="space-y-4">
                 <div>
                   <h2 className="text-2xl font-semibold tracking-tight">Generate Route</h2>
                   <p className="text-muted-foreground text-sm mt-1">
-                    Create a single-use or locked card for any merchant. Bypasses standard crypto card BIN restrictions.
+                    AI routes your payment through the optimal rail — stablecoin, virtual card, or P2P — bypassing BIN filters automatically.
                   </p>
                 </div>
 
@@ -520,7 +481,7 @@ function Home() {
                       <span className="text-primary/50">REQ</span>
                     </label>
                     <Input
-                      placeholder="e.g. amazon.com"
+                      placeholder="e.g. vercel.com"
                       className="font-mono bg-background/50 border-border/60 focus-visible:ring-primary/50 h-11"
                       value={merchant}
                       onChange={(e) => setMerchant(e.target.value)}
@@ -543,9 +504,7 @@ function Home() {
                         onChange={(e) => setAmount(e.target.value)}
                         disabled={isGenerating || cardReady}
                       />
-                      <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                        <span className="text-xs font-mono text-muted-foreground">USDC</span>
-                      </div>
+                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-mono text-muted-foreground">USDC</span>
                     </div>
                   </div>
 
@@ -554,7 +513,7 @@ function Home() {
                     onClick={startTerminalSequence}
                     disabled={!merchant || !amount || isGenerating || cardReady}
                   >
-                    {isGenerating ? "Routing..." : cardReady ? "Route Established" : "Generate Guaranteed Card"}
+                    {isGenerating ? "Analyzing routes..." : cardReady ? "Route Established" : "Find Best Route"}
                     {!isGenerating && !cardReady && <ArrowRight className="w-4 h-4 ml-2" />}
                     {isGenerating && <span className="ml-2 w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />}
                   </Button>
@@ -562,25 +521,20 @@ function Home() {
                   {(cardReady || routingError) && (
                     <Button
                       variant="ghost"
-                      className="w-full text-muted-foreground text-xs mt-2 hover:text-foreground h-8"
-                      onClick={() => {
-                        setCardReady(false);
-                        setMerchant("");
-                        setAmount("");
-                        setTerminalLines([]);
-                        setRoutingResult(null);
-                        setRoutingError(null);
-                      }}
+                      className="w-full text-muted-foreground text-xs hover:text-foreground h-8"
+                      onClick={reset}
                     >
-                      Reset &amp; Create Another
+                      <RefreshCw className="w-3 h-3 mr-1.5" /> Reset &amp; Try Another
                     </Button>
                   )}
                 </div>
               </div>
             </div>
 
+            {/* Right column */}
             <div className="lg:col-span-7 flex flex-col gap-4">
-              <div className="bg-[#0a0a0a] border border-[#1f1f1f] rounded-lg shadow-xl overflow-hidden flex flex-col h-[280px]">
+              {/* Terminal */}
+              <div className="bg-[#0a0a0a] border border-[#1f1f1f] rounded-lg shadow-xl overflow-hidden flex flex-col h-[260px]">
                 <div className="flex items-center px-4 py-2 border-b border-[#1f1f1f] bg-[#0f0f0f]">
                   <div className="flex gap-1.5">
                     <div className="w-2.5 h-2.5 rounded-full bg-red-500/20 border border-red-500/50" />
@@ -588,10 +542,9 @@ function Home() {
                     <div className="w-2.5 h-2.5 rounded-full bg-green-500/20 border border-green-500/50" />
                   </div>
                   <div className="mx-auto text-[10px] font-mono text-muted-foreground flex items-center gap-2">
-                    <Cpu className="w-3 h-3" /> pathpay-routing-engine-v2.1
+                    <Cpu className="w-3 h-3" /> pathpay-routing-engine-v3.0
                   </div>
                 </div>
-
                 <div ref={terminalRef} className="p-4 flex-1 overflow-y-auto font-mono text-xs leading-relaxed">
                   {!isGenerating && !cardReady && terminalLines.length === 0 && (
                     <div className="text-muted-foreground/40 italic flex items-center justify-center h-full">
@@ -610,110 +563,165 @@ function Home() {
                 </div>
               </div>
 
-              <div className={`transition-all duration-700 ${cardReady ? "opacity-100 translate-y-0" : "opacity-0 translate-y-4 pointer-events-none"}`}>
-                <div className="bg-gradient-to-br from-slate-800 to-[#0f172a] border border-slate-700/50 rounded-2xl p-6 shadow-2xl relative overflow-hidden aspect-[1.586/1] max-w-[420px] mx-auto w-full flex flex-col justify-between">
-                  <div className="absolute top-0 right-0 w-64 h-64 bg-primary/10 rounded-full blur-[80px] -translate-y-1/2 translate-x-1/2 pointer-events-none" />
-                  <div className="absolute bottom-0 left-0 w-48 h-48 bg-blue-500/10 rounded-full blur-[60px] translate-y-1/3 -translate-x-1/3 pointer-events-none" />
-
-                  <div className="relative z-10 flex justify-between items-start">
-                    <div className="w-12 h-8 rounded bg-gradient-to-r from-yellow-200/80 to-yellow-500/80 opacity-80" />
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono text-sm tracking-widest font-semibold text-white/90">ARC NETWORK</span>
-                      <ShieldCheck className="w-5 h-5 text-primary" />
-                    </div>
-                  </div>
-
-                  <div className="relative z-10 space-y-4">
-                    <div className="font-mono text-2xl tracking-[0.2em] text-white font-medium drop-shadow-md flex justify-between">
-                      <span>4532</span>
-                      <span>••••</span>
-                      <span>••••</span>
-                      <span>8821</span>
-                    </div>
-
-                    <div className="flex justify-between items-end">
-                      <div className="space-y-1">
-                        <div className="text-[10px] font-mono text-white/50 uppercase tracking-widest">Cardholder</div>
-                        <div className="font-mono text-sm text-white/90 tracking-wider">PATHPAY USER</div>
-                      </div>
-                      <div className="flex gap-6">
-                        <div className="space-y-1">
-                          <div className="text-[10px] font-mono text-white/50 uppercase tracking-widest">Valid Thru</div>
-                          <div className="font-mono text-sm text-white/90">08/27</div>
+              {/* Routing result — shown after analysis */}
+              <div className={`transition-all duration-700 space-y-3 ${cardReady ? "opacity-100 translate-y-0" : "opacity-0 translate-y-4 pointer-events-none"}`}>
+                {routingResult && (
+                  <>
+                    {/* Rail recommendation card */}
+                    <div className={`border rounded-xl p-4 ${railStyle}`}>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          {isStablecoin
+                            ? <Zap className="w-4 h-4 shrink-0" />
+                            : <CreditCard className="w-4 h-4 shrink-0" />}
+                          <span className="font-mono font-semibold text-sm">
+                            {RAIL_LABELS[routingResult.recommended_rail]}
+                          </span>
                         </div>
-                        <div className="space-y-1">
-                          <div className="text-[10px] font-mono text-white/50 uppercase tracking-widest">CVV</div>
-                          <div
-                            className="font-mono text-sm text-white/90 flex items-center gap-1 cursor-pointer select-none"
-                            onClick={() => setShowCvv(!showCvv)}
-                          >
-                            {showCvv ? "492" : "•••"}
-                            {showCvv ? <EyeOff className="w-3 h-3 text-white/50" /> : <Eye className="w-3 h-3 text-white/50" />}
-                          </div>
-                        </div>
+                        <span className="text-xs font-mono opacity-70">
+                          {Math.round(routingResult.confidence * 100)}% confidence
+                        </span>
                       </div>
+                      <p className="text-xs opacity-80 font-mono leading-relaxed">{routingResult.reason}</p>
+                      <p className="text-xs opacity-50 font-mono mt-1">via {routingResult.processor}</p>
                     </div>
-                  </div>
-                </div>
 
-                <div className="max-w-[420px] mx-auto mt-4 space-y-3">
-                  {routingResult && (
-                    <>
-                      {/* Billing Address */}
+                    {/* Billing address (virtual card routes) */}
+                    {routingResult.mock_billing_address && (
                       <div className="bg-card border border-border/50 rounded-lg p-3 flex justify-between items-center group hover:border-primary/30 transition-colors">
                         <div className="space-y-1 overflow-hidden">
-                          <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">Billing Address</div>
+                          <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">Use This Billing Address</div>
                           <div className="font-mono text-xs text-foreground">
-                            {routingResult.mock_billing_address.street}, {routingResult.mock_billing_address.city}, {routingResult.mock_billing_address.state} {routingResult.mock_billing_address.zip}, US
+                            {routingResult.mock_billing_address.street}, {routingResult.mock_billing_address.city}, {routingResult.mock_billing_address.state} {routingResult.mock_billing_address.zip}
                           </div>
                         </div>
                         <Button
                           variant="ghost"
                           size="icon"
                           className="h-8 w-8 text-muted-foreground group-hover:text-primary transition-colors shrink-0"
-                          onClick={() => navigator.clipboard.writeText(
-                            `${routingResult.mock_billing_address.street}, ${routingResult.mock_billing_address.city}, ${routingResult.mock_billing_address.state} ${routingResult.mock_billing_address.zip}, US`
-                          )}
+                          onClick={() => {
+                            const addr = routingResult.mock_billing_address!;
+                            navigator.clipboard.writeText(`${addr.street}, ${addr.city}, ${addr.state} ${addr.zip}`);
+                          }}
                         >
                           <Copy className="w-4 h-4" />
                         </Button>
                       </div>
+                    )}
 
-                      {/* AI Routing Summary */}
-                      <div className="bg-card border border-primary/20 rounded-lg p-4 space-y-3">
-                        <div className="text-[10px] font-mono text-primary uppercase tracking-widest flex items-center gap-1.5">
-                          <Cpu className="w-3 h-3" /> AI Routing Analysis
-                        </div>
-                        <div className="grid grid-cols-2 gap-x-4 gap-y-2 font-mono text-xs">
-                          <div>
-                            <span className="text-muted-foreground">Processor</span>
-                            <p className="text-foreground mt-0.5">{routingResult.processor}</p>
-                          </div>
-                          <div>
-                            <span className="text-muted-foreground">Rail</span>
-                            <p className="text-primary mt-0.5">{routingResult.recommended_rail}</p>
-                          </div>
-                          <div className="col-span-2">
-                            <span className="text-muted-foreground">Block Detected</span>
-                            <p className={`mt-0.5 ${routingResult.detected_block === "None detected" ? "text-muted-foreground/60" : "text-amber-400"}`}>
-                              {routingResult.detected_block}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="border-t border-border/40 pt-3 font-mono text-xs text-muted-foreground leading-relaxed italic">
-                          {routingResult.reason}
+                    {/* Fallback rails */}
+                    {routingResult.fallback_rails.length > 0 && (
+                      <div className="p-3 bg-card border border-border/50 rounded-lg">
+                        <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest mb-2">Fallback Rails</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {routingResult.fallback_rails.map((r) => (
+                            <span key={r} className="text-xs font-mono text-muted-foreground bg-muted/50 px-2 py-0.5 rounded">
+                              {RAIL_LABELS[r] ?? r}
+                            </span>
+                          ))}
                         </div>
                       </div>
-                    </>
-                  )}
-                </div>
+                    )}
+
+                    {/* Execute button */}
+                    {!txHash && !virtualCard && (
+                      <>
+                        <Button
+                          className="w-full h-11 font-mono uppercase tracking-wider text-sm"
+                          onClick={executePayment}
+                          disabled={executeLoading || !authenticated}
+                        >
+                          {executeLoading ? (
+                            <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Executing...</>
+                          ) : isStablecoin ? (
+                            <><Zap className="w-4 h-4 mr-2" /> Pay on Mantle</>
+                          ) : (
+                            <><CreditCard className="w-4 h-4 mr-2" /> Generate Virtual Card</>
+                          )}
+                        </Button>
+                        {!authenticated && (
+                          <p className="text-xs text-center text-muted-foreground font-mono">Sign in to execute payment</p>
+                        )}
+                      </>
+                    )}
+
+                    {/* TX hash result */}
+                    {txHash && (
+                      <div className="p-4 bg-green-500/10 border border-green-500/30 rounded-xl space-y-2">
+                        <div className="flex items-center gap-2 text-green-400 font-mono text-sm font-medium">
+                          <CheckCircle2 className="w-4 h-4 shrink-0" />
+                          Transaction confirmed on Mantle Sepolia
+                        </div>
+                        <a
+                          href={`https://explorer.sepolia.mantle.xyz/tx/${txHash}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs text-primary font-mono break-all hover:underline block"
+                        >
+                          {txHash}
+                        </a>
+                      </div>
+                    )}
+
+                    {/* Virtual card result */}
+                    {virtualCard && (
+                      <div className="space-y-3">
+                        <div className="bg-gradient-to-br from-slate-800 to-[#0f172a] border border-slate-700/50 rounded-2xl p-6 shadow-2xl relative overflow-hidden aspect-[1.586/1] max-w-[420px] mx-auto w-full flex flex-col justify-between">
+                          <div className="absolute top-0 right-0 w-64 h-64 bg-primary/10 rounded-full blur-[80px] -translate-y-1/2 translate-x-1/2 pointer-events-none" />
+                          <div className="absolute bottom-0 left-0 w-48 h-48 bg-blue-500/10 rounded-full blur-[60px] translate-y-1/3 -translate-x-1/3 pointer-events-none" />
+                          <div className="relative z-10 flex justify-between items-start">
+                            <div className="w-12 h-8 rounded bg-gradient-to-r from-yellow-200/80 to-yellow-500/80 opacity-80" />
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-sm tracking-widest font-semibold text-white/90">ARC NETWORK</span>
+                              <ShieldCheck className="w-5 h-5 text-primary" />
+                            </div>
+                          </div>
+                          <div className="relative z-10 space-y-4">
+                            <div className="font-mono text-xl tracking-[0.18em] text-white font-medium drop-shadow-md">
+                              {virtualCard.number}
+                            </div>
+                            <div className="flex justify-between items-end">
+                              <div className="space-y-1">
+                                <div className="text-[10px] font-mono text-white/50 uppercase tracking-widest">Cardholder</div>
+                                <div className="font-mono text-sm text-white/90 tracking-wider">{virtualCard.billing_name}</div>
+                              </div>
+                              <div className="flex gap-6">
+                                <div className="space-y-1">
+                                  <div className="text-[10px] font-mono text-white/50 uppercase tracking-widest">Valid Thru</div>
+                                  <div className="font-mono text-sm text-white/90">{virtualCard.expiry}</div>
+                                </div>
+                                <div className="space-y-1">
+                                  <div className="text-[10px] font-mono text-white/50 uppercase tracking-widest">CVV</div>
+                                  <div
+                                    className="font-mono text-sm text-white/90 flex items-center gap-1 cursor-pointer select-none"
+                                    onClick={() => setShowCvv(!showCvv)}
+                                  >
+                                    {showCvv ? virtualCard.cvv : "•••"}
+                                    {showCvv ? <EyeOff className="w-3 h-3 text-white/50" /> : <Eye className="w-3 h-3 text-white/50" />}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Error display */}
+                    {routingError && (
+                      <div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg text-destructive text-xs font-mono">
+                        {routingError}
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             </div>
           </TabsContent>
 
-          {/* TAB 2: SAAS AUTO-PAY */}
+          {/* TAB 2: SAAS AGENT */}
           <TabsContent value="saas" className="col-span-full m-0 p-0 outline-none flex justify-center">
-            <SaasAutoPayTab />
+            <SaasAgentTab />
           </TabsContent>
         </Tabs>
       </main>
@@ -745,8 +753,10 @@ function App() {
           showWalletLoginFirst: true,
         },
         embeddedWallets: {
-          createOnLogin: "users-without-wallets",
+          ethereum: { createOnLogin: "users-without-wallets" },
         },
+        defaultChain: mantleSepolia,
+        supportedChains: [mantleSepolia],
       }}
     >
       <WagmiProvider config={wagmiConfig}>
