@@ -27,22 +27,29 @@ export const RoutingDecisionSchema = z.object({
 
 export type RoutingDecision = z.infer<typeof RoutingDecisionSchema>;
 
+export type RoutingDecisionWithId = RoutingDecision & {
+  routing_id?: string;
+};
+
 export async function getRoutingDecision(
   merchantUrl: string,
   amount: string,
   userCountry: string = "NG",
-): Promise<RoutingDecision> {
+  authToken?: string | null,
+): Promise<RoutingDecisionWithId> {
   const response = await fetch("/api/route", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ merchantUrl, amount, userCountry }),
+    body: JSON.stringify({ merchantUrl, amount, userCountry, authToken }),
   });
 
   if (!response.ok) {
     const err = await response.json().catch(() => ({ error: "Routing engine failed" }));
-    throw new Error(err.error ?? "Routing engine failed");
+    throw new Error((err as { error?: string }).error ?? "Routing engine failed");
   }
 
   const data = await response.json();
-  return RoutingDecisionSchema.parse(data);
+  const { routing_id, ...rest } = data as RoutingDecisionWithId;
+  const validated = RoutingDecisionSchema.parse(rest);
+  return { ...validated, routing_id };
 }

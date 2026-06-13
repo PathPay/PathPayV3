@@ -1,5 +1,6 @@
 import app from "./app";
 import { logger } from "./lib/logger";
+import { ensureTablesExist } from "./lib/supabase";
 
 const rawPort = process.env["PORT"];
 
@@ -22,4 +23,7 @@ app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
+
+  // Best-effort Supabase table check — runs after server is ready
+  ensureTablesExist().catch((e) => logger.warn({ e }, "Supabase init skipped"));
 });

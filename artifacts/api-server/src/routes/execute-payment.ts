@@ -1,6 +1,7 @@
 import { Router, type IRouter } from "express";
 import { z } from "zod";
 import { PrivyClient } from "@privy-io/server-auth";
+import { supabaseAdmin } from "../lib/supabase";
 
 const router: IRouter = Router();
 
@@ -9,6 +10,8 @@ const RequestSchema = z.object({
   toAddress: z.string().min(1),
   amount: z.string().min(1),
   rail: z.enum(["stablecoin_direct", "virtual_card_stripe", "virtual_card_lithic", "p2p_corridor"]),
+  routingId: z.string().uuid().optional(),
+  merchantUrl: z.string().optional(),
 });
 
 function getPrivyClient() {
@@ -25,7 +28,7 @@ router.post("/execute-payment", async (req, res): Promise<void> => {
     return;
   }
 
-  const { privyToken, toAddress, amount, rail } = parsed.data;
+  const { privyToken, toAddress, amount, rail, routingId, merchantUrl } = parsed.data;
 
   let userId: string;
   try {
@@ -38,9 +41,11 @@ router.post("/execute-payment", async (req, res): Promise<void> => {
     return;
   }
 
+  let responseBody: Record<string, unknown>;
+
   if (rail !== "stablecoin_direct") {
     const lastFour = Math.floor(1000 + Math.random() * 9000);
-    res.json({
+    responseBody = {
       rail,
       status: "card_generated",
       userId,
@@ -50,21 +55,40 @@ router.post("/execute-payment", async (req, res): Promise<void> => {
         cvv: `${Math.floor(100 + Math.random() * 900)}`,
         billing_name: "PATHPAY USER",
       },
-    });
-    return;
+    };
+  } else {
+    responseBody = {
+      rail: "stablecoin_direct",
+      status: "ready_to_sign",
+      userId,
+      tx: {
+        to: toAddress,
+        chainId: 5003,
+        note: "Client signs via Privy embedded wallet on Mantle Sepolia",
+      },
+    };
   }
 
-  // Stablecoin direct — return unsigned tx for client to sign via Privy embedded wallet
-  res.json({
-    rail: "stablecoin_direct",
-    status: "ready_to_sign",
-    userId,
-    tx: {
-      to: toAddress,
-      chainId: 5003,
-      note: "Client signs via Privy embedded wallet on Mantle Sepolia",
-    },
-  });
+  // Persist payment event (best-effort)
+  try {
+    const card = responseBody.card as { number?: string } | undefined;
+    const cardLast4 = card?.number?.slice(-4) ?? null;
+
+    await supabaseAdmin.from("payment_events").insert({
+      user_id: userId,
+      routing_id: routingId ?? null,
+      rail,
+      amount,
+      merchant_url: merchantUrl ?? null,
+      status: responseBody.status as string,
+      tx_hash: null,
+      card_last4: cardLast4,
+    });
+  } catch (err) {
+    req.log.warn({ err }, "Payment event persistence error (non-fatal)");
+  }
+
+  res.json(responseBody);
 });
 
 export default router;

@@ -5,11 +5,12 @@ import { PrivyProvider, usePrivy, useWallets } from "@privy-io/react-auth";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import {
   Wallet, Eye, EyeOff, Copy, ArrowRight,
   Cpu, Activity, ShieldCheck, CheckCircle2, LogOut,
   ChevronRight, AlertCircle, Loader2, Mail, Zap, CreditCard, RefreshCw,
+  Clock, ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -44,9 +45,57 @@ const RAIL_STYLES: Record<string, string> = {
   p2p_corridor: "bg-yellow-500/10 text-yellow-400 border-yellow-500/30",
 };
 
+type HistoryEntry = {
+  id: string;
+  merchant_url: string;
+  amount: string;
+  recommended_rail: string;
+  processor: string;
+  confidence: number;
+  created_at: string;
+  payment_events: Array<{
+    id: string;
+    status: string;
+    tx_hash?: string | null;
+    card_last4?: string | null;
+    created_at: string;
+  }>;
+};
+
+type VirtualCard = {
+  number: string;
+  expiry: string;
+  cvv: string;
+  billing_name: string;
+};
+
+type AgentMessage = {
+  role: "ai" | "user";
+  content: string;
+  intent?: {
+    merchant: string;
+    amount_usdc: string;
+    recommended_rail: string;
+    contract_address: string;
+  } | null;
+};
+
 function truncateAddress(addr: string) {
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 }
+
+function timeAgo(iso: string) {
+  const ms = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(ms / 60000);
+  const hrs = Math.floor(mins / 60);
+  const days = Math.floor(hrs / 24);
+  if (days > 0) return `${days}d ago`;
+  if (hrs > 0) return `${hrs}h ago`;
+  if (mins > 0) return `${mins}m ago`;
+  return "just now";
+}
+
+// ─── Header ──────────────────────────────────────────────────────────────────
 
 function PrivyHeaderSection() {
   const { ready, authenticated, user, login, logout } = usePrivy();
@@ -55,7 +104,10 @@ function PrivyHeaderSection() {
   const wallet = wallets[0];
   const address = wallet?.address;
   const email = user?.email?.address;
-  const displayIdentity = address ? truncateAddress(address) : email ?? null;
+  const phone = user?.phone?.number;
+  const displayIdentity = address
+    ? truncateAddress(address)
+    : email ?? phone ?? null;
 
   const { data: balance, isLoading: balanceLoading } = useBalance({
     address: address as `0x${string}` | undefined,
@@ -68,11 +120,7 @@ function PrivyHeaderSection() {
     : null;
 
   if (!ready) {
-    return (
-      <div className="flex items-center gap-2">
-        <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
-      </div>
-    );
+    return <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />;
   }
 
   if (authenticated && displayIdentity) {
@@ -81,30 +129,21 @@ function PrivyHeaderSection() {
         <div className="hidden md:flex flex-col items-end mr-2">
           <span className="text-xs font-mono text-muted-foreground uppercase tracking-widest flex items-center gap-1">
             <Activity className="w-3 h-3 text-primary" />
-            {address ? "Active Wallet" : "Signed In"}
+            {address ? "Wallet" : "Signed In"}
           </span>
           <div className="flex items-center gap-2">
-            {address ? (
+            {address && !balanceLoading && formattedBalance ? (
               <>
-                <span className="font-mono font-medium text-base">
-                  {balanceLoading ? (
-                    <span className="text-muted-foreground text-sm">Loading...</span>
-                  ) : formattedBalance ? (
-                    formattedBalance
-                  ) : (
-                    <span className="text-muted-foreground text-sm">—</span>
-                  )}
-                </span>
+                <span className="font-mono font-medium text-base">{formattedBalance}</span>
                 <Badge variant="outline" className="h-5 px-1.5 text-[10px] font-mono rounded bg-primary/10 text-primary border-primary/20">
                   ARC NET
                 </Badge>
               </>
             ) : (
-              <span className="font-mono text-sm text-muted-foreground truncate max-w-[160px]">{email}</span>
+              <span className="font-mono text-sm text-muted-foreground truncate max-w-[180px]">{displayIdentity}</span>
             )}
           </div>
         </div>
-
         <div className="flex items-center gap-2">
           <div className="border border-primary/30 bg-primary/5 rounded-md px-3 py-1.5 font-mono text-xs text-primary hidden sm:flex items-center gap-1.5">
             {address ? <Wallet className="w-3 h-3" /> : <Mail className="w-3 h-3" />}
@@ -149,16 +188,7 @@ function PrivyHeaderSection() {
   );
 }
 
-type AgentMessage = {
-  role: "ai" | "user";
-  content: string;
-  intent?: {
-    merchant: string;
-    amount_usdc: string;
-    recommended_rail: string;
-    contract_address: string;
-  } | null;
-};
+// ─── SaaS Agent Tab ───────────────────────────────────────────────────────────
 
 function SaasAgentTab() {
   const { authenticated } = usePrivy();
@@ -189,17 +219,10 @@ function SaasAgentTab() {
       const data = await res.json();
       setMessages((prev) => [
         ...prev,
-        {
-          role: "ai",
-          content: data.response || "Unable to process request.",
-          intent: data.intent,
-        },
+        { role: "ai", content: data.response || "Unable to process.", intent: data.intent },
       ]);
     } catch {
-      setMessages((prev) => [
-        ...prev,
-        { role: "ai", content: "Failed to reach payment agent." },
-      ]);
+      setMessages((prev) => [...prev, { role: "ai", content: "Failed to reach payment agent." }]);
     } finally {
       setLoading(false);
     }
@@ -289,12 +312,152 @@ function SaasAgentTab() {
   );
 }
 
-type VirtualCard = {
-  number: string;
-  expiry: string;
-  cvv: string;
-  billing_name: string;
-};
+// ─── History Tab ──────────────────────────────────────────────────────────────
+
+function HistoryTab() {
+  const { authenticated, getAccessToken } = usePrivy();
+  const [entries, setEntries] = useState<HistoryEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadHistory = useCallback(async () => {
+    if (!authenticated) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const token = await getAccessToken();
+      const res = await fetch("/api/history", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Failed to load history");
+      setEntries(data.history ?? []);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load history");
+    } finally {
+      setLoading(false);
+    }
+  }, [authenticated, getAccessToken]);
+
+  useEffect(() => {
+    loadHistory();
+  }, [loadHistory]);
+
+  if (!authenticated) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[400px] gap-4 text-center">
+        <AlertCircle className="w-8 h-8 text-muted-foreground" />
+        <div>
+          <p className="font-mono text-sm font-medium">Sign In to View History</p>
+          <p className="text-muted-foreground text-xs mt-1">Your routing history is saved per account</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[400px] gap-2 text-muted-foreground">
+        <Loader2 className="w-4 h-4 animate-spin" />
+        <span className="font-mono text-sm">Loading history...</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[400px] gap-4 text-center">
+        <AlertCircle className="w-6 h-6 text-destructive" />
+        <p className="font-mono text-sm text-muted-foreground">{error}</p>
+        <Button variant="outline" size="sm" onClick={loadHistory} className="font-mono text-xs">
+          <RefreshCw className="w-3 h-3 mr-1.5" /> Retry
+        </Button>
+      </div>
+    );
+  }
+
+  if (entries.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[400px] gap-4 text-center">
+        <Clock className="w-8 h-8 text-muted-foreground/40" />
+        <div>
+          <p className="font-mono text-sm font-medium text-muted-foreground">No routes yet</p>
+          <p className="text-muted-foreground/60 text-xs mt-1">Your routing history will appear here</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="w-full max-w-2xl mx-auto space-y-3">
+      <div className="flex items-center justify-between mb-2">
+        <p className="font-mono text-xs text-muted-foreground uppercase tracking-widest">
+          {entries.length} route{entries.length !== 1 ? "s" : ""} found
+        </p>
+        <Button variant="ghost" size="sm" onClick={loadHistory} className="font-mono text-xs h-7 text-muted-foreground hover:text-foreground">
+          <RefreshCw className="w-3 h-3 mr-1" /> Refresh
+        </Button>
+      </div>
+
+      {entries.map((entry) => {
+        const railStyle = RAIL_STYLES[entry.recommended_rail] ?? "border-border/50 bg-card text-foreground";
+        const payment = entry.payment_events?.[0];
+
+        return (
+          <div key={entry.id} className="bg-card border border-border/50 rounded-xl p-4 space-y-3 hover:border-border transition-colors">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <p className="font-mono text-sm font-medium truncate">{entry.merchant_url}</p>
+                <p className="text-xs text-muted-foreground font-mono mt-0.5">
+                  ${entry.amount} USDC · via {entry.processor}
+                </p>
+              </div>
+              <span className="text-[10px] font-mono text-muted-foreground shrink-0 mt-0.5">
+                {timeAgo(entry.created_at)}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className={`inline-flex items-center gap-1.5 text-[10px] font-mono px-2 py-0.5 rounded border ${railStyle}`}>
+                {entry.recommended_rail === "stablecoin_direct"
+                  ? <Zap className="w-2.5 h-2.5" />
+                  : <CreditCard className="w-2.5 h-2.5" />}
+                {RAIL_LABELS[entry.recommended_rail] ?? entry.recommended_rail}
+              </span>
+              <span className="text-[10px] font-mono text-muted-foreground">
+                {Math.round(entry.confidence * 100)}% confidence
+              </span>
+              {payment && (
+                <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
+                  payment.status === "card_generated"
+                    ? "bg-blue-500/10 text-blue-400 border-blue-500/30"
+                    : "bg-green-500/10 text-green-400 border-green-500/30"
+                }`}>
+                  {payment.status === "card_generated"
+                    ? `Card ····${payment.card_last4 ?? "****"}`
+                    : "Executed"}
+                </span>
+              )}
+              {payment?.tx_hash && (
+                <a
+                  href={`https://explorer.sepolia.mantle.xyz/tx/${payment.tx_hash}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[10px] font-mono text-primary/70 hover:text-primary flex items-center gap-1"
+                >
+                  <ExternalLink className="w-2.5 h-2.5" />
+                  {payment.tx_hash.slice(0, 10)}...
+                </a>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Home ────────────────────────────────────────────────────────────────────
 
 function Home() {
   useEffect(() => {
@@ -304,6 +467,7 @@ function Home() {
   const { authenticated, getAccessToken } = usePrivy();
   const { wallets } = useWallets();
 
+  // Routing state
   const [merchant, setMerchant] = useState("");
   const [amount, setAmount] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
@@ -312,13 +476,16 @@ function Home() {
   const [showCvv, setShowCvv] = useState(false);
   const [routingResult, setRoutingResult] = useState<RoutingDecision | null>(null);
   const [routingError, setRoutingError] = useState<string | null>(null);
+  const [currentRoutingId, setCurrentRoutingId] = useState<string | undefined>();
+
+  // Payment execution state
   const [executeLoading, setExecuteLoading] = useState(false);
   const [txHash, setTxHash] = useState<string | null>(null);
   const [virtualCard, setVirtualCard] = useState<VirtualCard | null>(null);
+
   const terminalRef = useRef<HTMLDivElement>(null);
 
-  const appendLine = (line: string) =>
-    setTerminalLines((prev) => [...prev, line]);
+  const appendLine = (line: string) => setTerminalLines((prev) => [...prev, line]);
 
   const startTerminalSequence = async () => {
     if (!merchant || !amount) return;
@@ -329,15 +496,21 @@ function Home() {
     setRoutingError(null);
     setTxHash(null);
     setVirtualCard(null);
+    setCurrentRoutingId(undefined);
 
     for (const log of STAGED_LOGS) {
       appendLine(log);
       await new Promise((r) => setTimeout(r, 900));
     }
 
-    let result: RoutingDecision;
+    let authToken: string | null = null;
+    if (authenticated) {
+      authToken = await getAccessToken().catch(() => null);
+    }
+
+    let result: RoutingDecision & { routing_id?: string };
     try {
-      result = await getRoutingDecision(merchant, amount);
+      result = await getRoutingDecision(merchant, amount, "NG", authToken);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Routing engine unavailable";
       appendLine(`> ERROR: ${msg}`);
@@ -345,6 +518,8 @@ function Home() {
       setIsGenerating(false);
       return;
     }
+
+    if (result.routing_id) setCurrentRoutingId(result.routing_id);
 
     appendLine(`> Processor: ${result.processor}`);
     await new Promise((r) => setTimeout(r, 700));
@@ -394,6 +569,8 @@ function Home() {
             toAddress: "0x000000000000000000000000000000000000dEaD",
             amount,
             rail: routingResult.recommended_rail,
+            routingId: currentRoutingId,
+            merchantUrl: merchant,
           }),
         });
         const data = await res.json();
@@ -401,8 +578,7 @@ function Home() {
         if (data.card) setVirtualCard(data.card);
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Payment failed";
-      setRoutingError(msg);
+      setRoutingError(err instanceof Error ? err.message : "Payment failed");
     } finally {
       setExecuteLoading(false);
     }
@@ -418,6 +594,7 @@ function Home() {
     setTxHash(null);
     setVirtualCard(null);
     setExecuteLoading(false);
+    setCurrentRoutingId(undefined);
   };
 
   useEffect(() => {
@@ -426,7 +603,9 @@ function Home() {
     }
   }, [terminalLines]);
 
-  const railStyle = routingResult ? (RAIL_STYLES[routingResult.recommended_rail] ?? "border-border/50 bg-card text-foreground") : "";
+  const railStyle = routingResult
+    ? (RAIL_STYLES[routingResult.recommended_rail] ?? "border-border/50 bg-card text-foreground")
+    : "";
   const isStablecoin = routingResult?.recommended_rail === "stablecoin_direct";
 
   return (
@@ -447,91 +626,94 @@ function Home() {
             <TabsList className="bg-muted/50 p-1 border border-border/50 rounded-md">
               <TabsTrigger
                 value="physical"
-                className="font-mono text-sm px-6 data-[state=active]:bg-card data-[state=active]:text-primary data-[state=active]:shadow-sm transition-all rounded"
+                className="font-mono text-sm px-5 data-[state=active]:bg-card data-[state=active]:text-primary data-[state=active]:shadow-sm transition-all rounded"
               >
                 Physical Checkout
               </TabsTrigger>
               <TabsTrigger
                 value="saas"
-                className="font-mono text-sm px-6 data-[state=active]:bg-card data-[state=active]:text-primary data-[state=active]:shadow-sm transition-all rounded"
+                className="font-mono text-sm px-5 data-[state=active]:bg-card data-[state=active]:text-primary data-[state=active]:shadow-sm transition-all rounded"
               >
                 SaaS Auto-Pay
+              </TabsTrigger>
+              <TabsTrigger
+                value="history"
+                className="font-mono text-sm px-5 data-[state=active]:bg-card data-[state=active]:text-primary data-[state=active]:shadow-sm transition-all rounded"
+              >
+                <Clock className="w-3.5 h-3.5 mr-1.5" />
+                History
               </TabsTrigger>
             </TabsList>
           </div>
 
-          {/* TAB 1: PHYSICAL CHECKOUT */}
-          <TabsContent value="physical" className="col-span-full grid grid-cols-1 lg:grid-cols-12 gap-8 m-0 p-0 outline-none">
-            {/* Left column */}
+          {/* ── Physical Checkout ─────────────────────────────────────── */}
+          <TabsContent value="physical" className="grid grid-cols-1 lg:grid-cols-12 gap-8 m-0 p-0 outline-none">
             <div className="lg:col-span-5 flex flex-col gap-6">
-              <div className="space-y-4">
-                <div>
-                  <h2 className="text-2xl font-semibold tracking-tight">Generate Route</h2>
-                  <p className="text-muted-foreground text-sm mt-1">
-                    AI routes your payment through the optimal rail — stablecoin, virtual card, or P2P — bypassing BIN filters automatically.
-                  </p>
+              <div>
+                <h2 className="text-2xl font-semibold tracking-tight">Generate Route</h2>
+                <p className="text-muted-foreground text-sm mt-1">
+                  AI routes your payment through the optimal rail — stablecoin, virtual card, or P2P — bypassing BIN filters automatically.
+                </p>
+              </div>
+
+              <div className="space-y-5 bg-card border border-border/50 rounded-xl p-5 shadow-sm relative overflow-hidden group">
+                <div className="absolute top-0 left-0 w-1 h-full bg-primary/50 group-hover:bg-primary transition-colors duration-500" />
+
+                <div className="space-y-2">
+                  <label className="text-xs font-mono text-muted-foreground uppercase tracking-widest flex justify-between">
+                    <span>Merchant Name / URL</span>
+                    <span className="text-primary/50">REQ</span>
+                  </label>
+                  <Input
+                    placeholder="e.g. vercel.com"
+                    className="font-mono bg-background/50 border-border/60 focus-visible:ring-primary/50 h-11"
+                    value={merchant}
+                    onChange={(e) => setMerchant(e.target.value)}
+                    disabled={isGenerating || cardReady}
+                  />
                 </div>
 
-                <div className="space-y-5 bg-card border border-border/50 rounded-xl p-5 shadow-sm relative overflow-hidden group">
-                  <div className="absolute top-0 left-0 w-1 h-full bg-primary/50 group-hover:bg-primary transition-colors duration-500" />
-
-                  <div className="space-y-2">
-                    <label className="text-xs font-mono text-muted-foreground uppercase tracking-widest flex justify-between">
-                      <span>Merchant Name / URL</span>
-                      <span className="text-primary/50">REQ</span>
-                    </label>
+                <div className="space-y-2">
+                  <label className="text-xs font-mono text-muted-foreground uppercase tracking-widest flex justify-between">
+                    <span>Amount (USDC)</span>
+                    <span className="text-primary/50">REQ</span>
+                  </label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground font-mono">$</span>
                     <Input
-                      placeholder="e.g. vercel.com"
-                      className="font-mono bg-background/50 border-border/60 focus-visible:ring-primary/50 h-11"
-                      value={merchant}
-                      onChange={(e) => setMerchant(e.target.value)}
+                      type="number"
+                      placeholder="0.00"
+                      className="font-mono pl-7 bg-background/50 border-border/60 focus-visible:ring-primary/50 h-11"
+                      value={amount}
+                      onChange={(e) => setAmount(e.target.value)}
                       disabled={isGenerating || cardReady}
                     />
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-mono text-muted-foreground">USDC</span>
                   </div>
-
-                  <div className="space-y-2">
-                    <label className="text-xs font-mono text-muted-foreground uppercase tracking-widest flex justify-between">
-                      <span>Amount (USDC)</span>
-                      <span className="text-primary/50">REQ</span>
-                    </label>
-                    <div className="relative">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground font-mono">$</span>
-                      <Input
-                        type="number"
-                        placeholder="0.00"
-                        className="font-mono pl-7 bg-background/50 border-border/60 focus-visible:ring-primary/50 h-11"
-                        value={amount}
-                        onChange={(e) => setAmount(e.target.value)}
-                        disabled={isGenerating || cardReady}
-                      />
-                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-mono text-muted-foreground">USDC</span>
-                    </div>
-                  </div>
-
-                  <Button
-                    className="w-full h-12 font-mono uppercase tracking-wider text-sm bg-primary/10 hover:bg-primary/20 text-primary border border-primary/30 transition-all"
-                    onClick={startTerminalSequence}
-                    disabled={!merchant || !amount || isGenerating || cardReady}
-                  >
-                    {isGenerating ? "Analyzing routes..." : cardReady ? "Route Established" : "Find Best Route"}
-                    {!isGenerating && !cardReady && <ArrowRight className="w-4 h-4 ml-2" />}
-                    {isGenerating && <span className="ml-2 w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />}
-                  </Button>
-
-                  {(cardReady || routingError) && (
-                    <Button
-                      variant="ghost"
-                      className="w-full text-muted-foreground text-xs hover:text-foreground h-8"
-                      onClick={reset}
-                    >
-                      <RefreshCw className="w-3 h-3 mr-1.5" /> Reset &amp; Try Another
-                    </Button>
-                  )}
                 </div>
+
+                <Button
+                  className="w-full h-12 font-mono uppercase tracking-wider text-sm bg-primary/10 hover:bg-primary/20 text-primary border border-primary/30 transition-all"
+                  onClick={startTerminalSequence}
+                  disabled={!merchant || !amount || isGenerating || cardReady}
+                >
+                  {isGenerating ? "Analyzing routes..." : cardReady ? "Route Established" : "Find Best Route"}
+                  {!isGenerating && !cardReady && <ArrowRight className="w-4 h-4 ml-2" />}
+                  {isGenerating && <span className="ml-2 w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />}
+                </Button>
+
+                {(cardReady || routingError) && (
+                  <Button
+                    variant="ghost"
+                    className="w-full text-muted-foreground text-xs hover:text-foreground h-8"
+                    onClick={reset}
+                  >
+                    <RefreshCw className="w-3 h-3 mr-1.5" /> Reset &amp; Try Another
+                  </Button>
+                )}
               </div>
             </div>
 
-            {/* Right column */}
             <div className="lg:col-span-7 flex flex-col gap-4">
               {/* Terminal */}
               <div className="bg-[#0a0a0a] border border-[#1f1f1f] rounded-lg shadow-xl overflow-hidden flex flex-col h-[260px]">
@@ -563,17 +745,15 @@ function Home() {
                 </div>
               </div>
 
-              {/* Routing result — shown after analysis */}
+              {/* Routing result */}
               <div className={`transition-all duration-700 space-y-3 ${cardReady ? "opacity-100 translate-y-0" : "opacity-0 translate-y-4 pointer-events-none"}`}>
                 {routingResult && (
                   <>
-                    {/* Rail recommendation card */}
+                    {/* Rail badge */}
                     <div className={`border rounded-xl p-4 ${railStyle}`}>
                       <div className="flex items-center justify-between mb-2">
                         <div className="flex items-center gap-2">
-                          {isStablecoin
-                            ? <Zap className="w-4 h-4 shrink-0" />
-                            : <CreditCard className="w-4 h-4 shrink-0" />}
+                          {isStablecoin ? <Zap className="w-4 h-4 shrink-0" /> : <CreditCard className="w-4 h-4 shrink-0" />}
                           <span className="font-mono font-semibold text-sm">
                             {RAIL_LABELS[routingResult.recommended_rail]}
                           </span>
@@ -586,7 +766,7 @@ function Home() {
                       <p className="text-xs opacity-50 font-mono mt-1">via {routingResult.processor}</p>
                     </div>
 
-                    {/* Billing address (virtual card routes) */}
+                    {/* Billing address */}
                     {routingResult.mock_billing_address && (
                       <div className="bg-card border border-border/50 rounded-lg p-3 flex justify-between items-center group hover:border-primary/30 transition-colors">
                         <div className="space-y-1 overflow-hidden">
@@ -600,8 +780,8 @@ function Home() {
                           size="icon"
                           className="h-8 w-8 text-muted-foreground group-hover:text-primary transition-colors shrink-0"
                           onClick={() => {
-                            const addr = routingResult.mock_billing_address!;
-                            navigator.clipboard.writeText(`${addr.street}, ${addr.city}, ${addr.state} ${addr.zip}`);
+                            const a = routingResult.mock_billing_address!;
+                            navigator.clipboard.writeText(`${a.street}, ${a.city}, ${a.state} ${a.zip}`);
                           }}
                         >
                           <Copy className="w-4 h-4" />
@@ -645,7 +825,7 @@ function Home() {
                       </>
                     )}
 
-                    {/* TX hash result */}
+                    {/* TX hash */}
                     {txHash && (
                       <div className="p-4 bg-green-500/10 border border-green-500/30 rounded-xl space-y-2">
                         <div className="flex items-center gap-2 text-green-400 font-mono text-sm font-medium">
@@ -663,42 +843,40 @@ function Home() {
                       </div>
                     )}
 
-                    {/* Virtual card result */}
+                    {/* Virtual card */}
                     {virtualCard && (
-                      <div className="space-y-3">
-                        <div className="bg-gradient-to-br from-slate-800 to-[#0f172a] border border-slate-700/50 rounded-2xl p-6 shadow-2xl relative overflow-hidden aspect-[1.586/1] max-w-[420px] mx-auto w-full flex flex-col justify-between">
-                          <div className="absolute top-0 right-0 w-64 h-64 bg-primary/10 rounded-full blur-[80px] -translate-y-1/2 translate-x-1/2 pointer-events-none" />
-                          <div className="absolute bottom-0 left-0 w-48 h-48 bg-blue-500/10 rounded-full blur-[60px] translate-y-1/3 -translate-x-1/3 pointer-events-none" />
-                          <div className="relative z-10 flex justify-between items-start">
-                            <div className="w-12 h-8 rounded bg-gradient-to-r from-yellow-200/80 to-yellow-500/80 opacity-80" />
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono text-sm tracking-widest font-semibold text-white/90">ARC NETWORK</span>
-                              <ShieldCheck className="w-5 h-5 text-primary" />
-                            </div>
+                      <div className="bg-gradient-to-br from-slate-800 to-[#0f172a] border border-slate-700/50 rounded-2xl p-6 shadow-2xl relative overflow-hidden aspect-[1.586/1] max-w-[420px] mx-auto w-full flex flex-col justify-between">
+                        <div className="absolute top-0 right-0 w-64 h-64 bg-primary/10 rounded-full blur-[80px] -translate-y-1/2 translate-x-1/2 pointer-events-none" />
+                        <div className="absolute bottom-0 left-0 w-48 h-48 bg-blue-500/10 rounded-full blur-[60px] translate-y-1/3 -translate-x-1/3 pointer-events-none" />
+                        <div className="relative z-10 flex justify-between items-start">
+                          <div className="w-12 h-8 rounded bg-gradient-to-r from-yellow-200/80 to-yellow-500/80 opacity-80" />
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-sm tracking-widest font-semibold text-white/90">ARC NETWORK</span>
+                            <ShieldCheck className="w-5 h-5 text-primary" />
                           </div>
-                          <div className="relative z-10 space-y-4">
-                            <div className="font-mono text-xl tracking-[0.18em] text-white font-medium drop-shadow-md">
-                              {virtualCard.number}
+                        </div>
+                        <div className="relative z-10 space-y-4">
+                          <div className="font-mono text-xl tracking-[0.18em] text-white font-medium drop-shadow-md">
+                            {virtualCard.number}
+                          </div>
+                          <div className="flex justify-between items-end">
+                            <div className="space-y-1">
+                              <div className="text-[10px] font-mono text-white/50 uppercase tracking-widest">Cardholder</div>
+                              <div className="font-mono text-sm text-white/90 tracking-wider">{virtualCard.billing_name}</div>
                             </div>
-                            <div className="flex justify-between items-end">
+                            <div className="flex gap-6">
                               <div className="space-y-1">
-                                <div className="text-[10px] font-mono text-white/50 uppercase tracking-widest">Cardholder</div>
-                                <div className="font-mono text-sm text-white/90 tracking-wider">{virtualCard.billing_name}</div>
+                                <div className="text-[10px] font-mono text-white/50 uppercase tracking-widest">Valid Thru</div>
+                                <div className="font-mono text-sm text-white/90">{virtualCard.expiry}</div>
                               </div>
-                              <div className="flex gap-6">
-                                <div className="space-y-1">
-                                  <div className="text-[10px] font-mono text-white/50 uppercase tracking-widest">Valid Thru</div>
-                                  <div className="font-mono text-sm text-white/90">{virtualCard.expiry}</div>
-                                </div>
-                                <div className="space-y-1">
-                                  <div className="text-[10px] font-mono text-white/50 uppercase tracking-widest">CVV</div>
-                                  <div
-                                    className="font-mono text-sm text-white/90 flex items-center gap-1 cursor-pointer select-none"
-                                    onClick={() => setShowCvv(!showCvv)}
-                                  >
-                                    {showCvv ? virtualCard.cvv : "•••"}
-                                    {showCvv ? <EyeOff className="w-3 h-3 text-white/50" /> : <Eye className="w-3 h-3 text-white/50" />}
-                                  </div>
+                              <div className="space-y-1">
+                                <div className="text-[10px] font-mono text-white/50 uppercase tracking-widest">CVV</div>
+                                <div
+                                  className="font-mono text-sm text-white/90 flex items-center gap-1 cursor-pointer select-none"
+                                  onClick={() => setShowCvv(!showCvv)}
+                                >
+                                  {showCvv ? virtualCard.cvv : "•••"}
+                                  {showCvv ? <EyeOff className="w-3 h-3 text-white/50" /> : <Eye className="w-3 h-3 text-white/50" />}
                                 </div>
                               </div>
                             </div>
@@ -707,7 +885,7 @@ function Home() {
                       </div>
                     )}
 
-                    {/* Error display */}
+                    {/* Error */}
                     {routingError && (
                       <div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg text-destructive text-xs font-mono">
                         {routingError}
@@ -719,9 +897,14 @@ function Home() {
             </div>
           </TabsContent>
 
-          {/* TAB 2: SAAS AGENT */}
-          <TabsContent value="saas" className="col-span-full m-0 p-0 outline-none flex justify-center">
+          {/* ── SaaS Agent ────────────────────────────────────────────── */}
+          <TabsContent value="saas" className="m-0 p-0 outline-none flex justify-center">
             <SaasAgentTab />
+          </TabsContent>
+
+          {/* ── History ───────────────────────────────────────────────── */}
+          <TabsContent value="history" className="m-0 p-0 outline-none flex justify-center">
+            <HistoryTab />
           </TabsContent>
         </Tabs>
       </main>
@@ -729,7 +912,9 @@ function Home() {
   );
 }
 
-function Router() {
+// ─── Router & App ─────────────────────────────────────────────────────────────
+
+function AppRouter() {
   return (
     <Switch>
       <Route path="/" component={Home} />
@@ -743,14 +928,14 @@ function App() {
     <PrivyProvider
       appId={import.meta.env.VITE_PRIVY_APP_ID}
       config={{
-        loginMethods: ["email", "wallet", "google"],
+        loginMethods: ["email", "sms", "google", "twitter", "apple", "wallet"],
         appearance: {
           theme: "dark",
           accentColor: "#22c55e",
           logo: undefined,
           landingHeader: "Sign in to PathPay",
-          loginMessage: "Connect your wallet or sign in with email to get started.",
-          showWalletLoginFirst: true,
+          loginMessage: "Pay anything, from anywhere. No crypto wallet needed.",
+          showWalletLoginFirst: false,
         },
         embeddedWallets: {
           ethereum: { createOnLogin: "users-without-wallets" },
@@ -763,7 +948,7 @@ function App() {
         <QueryClientProvider client={queryClient}>
           <TooltipProvider>
             <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
-              <Router />
+              <AppRouter />
             </WouterRouter>
             <Toaster />
           </TooltipProvider>

@@ -1,5 +1,7 @@
 import { Router, type IRouter } from "express";
 import { z } from "zod";
+import { PrivyClient } from "@privy-io/server-auth";
+import { supabaseAdmin } from "../lib/supabase";
 
 const router: IRouter = Router();
 
@@ -7,6 +9,7 @@ const RequestSchema = z.object({
   merchantUrl: z.string().min(1),
   amount: z.string().min(1),
   userCountry: z.string().default("NG"),
+  authToken: z.string().optional(),
 });
 
 const systemPrompt = `You are PathPay's payment routing intelligence. Analyze merchants and return optimal payment rails for emerging market users facing BIN filtering.
@@ -34,6 +37,13 @@ JSON schema:
   "fallback_rails": ["string"]
 }`;
 
+function getPrivyClient() {
+  const appId = process.env.PRIVY_APP_ID;
+  const secret = process.env.PRIVY_APP_SECRET;
+  if (!appId || !secret) return null;
+  return new PrivyClient(appId, secret);
+}
+
 router.post("/route", async (req, res): Promise<void> => {
   const parsed = RequestSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -41,13 +51,15 @@ router.post("/route", async (req, res): Promise<void> => {
     return;
   }
 
-  const { merchantUrl, amount, userCountry } = parsed.data;
+  const { merchantUrl, amount, userCountry, authToken } = parsed.data;
 
   const userMessage = `Merchant URL: ${merchantUrl}
 Payment amount: ${amount} USDC
 User's country: ${userCountry}
 
 Analyze this merchant and return the optimal payment routing decision.`;
+
+  let routingResult: Record<string, unknown>;
 
   try {
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -81,16 +93,57 @@ Analyze this merchant and return the optimal payment routing decision.`;
     const cleaned = content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
 
     try {
-      const result = JSON.parse(cleaned);
-      res.json(result);
+      routingResult = JSON.parse(cleaned);
     } catch {
       req.log.error({ content }, "Failed to parse routing JSON");
       res.status(500).json({ error: "Invalid AI response" });
+      return;
     }
   } catch (err) {
     req.log.error({ err }, "Routing engine error");
     res.status(500).json({ error: "Routing engine unavailable" });
+    return;
   }
+
+  // Persist routing history (best-effort, non-blocking)
+  let routingId: string | undefined;
+  try {
+    let userId: string | undefined;
+
+    if (authToken) {
+      const privyClient = getPrivyClient();
+      if (privyClient) {
+        const claims = await privyClient.verifyAuthToken(authToken).catch(() => null);
+        if (claims) userId = claims.userId;
+      }
+    }
+
+    const { data: row, error: insertError } = await supabaseAdmin
+      .from("routing_history")
+      .insert({
+        user_id: userId ?? null,
+        merchant_url: merchantUrl,
+        amount,
+        recommended_rail: routingResult.recommended_rail,
+        processor: routingResult.processor,
+        confidence: routingResult.confidence,
+        reason: routingResult.reason,
+        billing_address: routingResult.mock_billing_address ?? null,
+        fallback_rails: routingResult.fallback_rails ?? [],
+      })
+      .select("id")
+      .single();
+
+    if (insertError) {
+      req.log.warn({ insertError }, "Failed to persist routing history");
+    } else {
+      routingId = row?.id;
+    }
+  } catch (err) {
+    req.log.warn({ err }, "Routing history persistence error (non-fatal)");
+  }
+
+  res.json({ ...routingResult, routing_id: routingId });
 });
 
 export default router;
