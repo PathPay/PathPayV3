@@ -10,7 +10,7 @@ import {
   Wallet, Eye, EyeOff, Copy, ArrowRight,
   Cpu, Activity, ShieldCheck, CheckCircle2, LogOut,
   ChevronRight, AlertCircle, Loader2, Mail, Zap, CreditCard, RefreshCw,
-  Clock, ExternalLink,
+  Clock, ExternalLink, ArrowDownLeft, ArrowUpRight, QrCode, Send,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -32,16 +32,14 @@ const STAGED_LOGS = [
 ];
 
 const RAIL_LABELS: Record<string, string> = {
+  immersve_card: "Real Mastercard (Immersve + USDC)",
   stablecoin_direct: "Stablecoin Direct (Mantle)",
-  virtual_card_stripe: "Virtual Card — Stripe BIN",
-  virtual_card_lithic: "Virtual Card — Lithic BIN",
   p2p_corridor: "P2P Corridor",
 };
 
 const RAIL_STYLES: Record<string, string> = {
+  immersve_card: "bg-blue-500/10 text-blue-400 border-blue-500/30",
   stablecoin_direct: "bg-green-500/10 text-green-400 border-green-500/30",
-  virtual_card_stripe: "bg-blue-500/10 text-blue-400 border-blue-500/30",
-  virtual_card_lithic: "bg-purple-500/10 text-purple-400 border-purple-500/30",
   p2p_corridor: "bg-yellow-500/10 text-yellow-400 border-yellow-500/30",
 };
 
@@ -188,7 +186,310 @@ function PrivyHeaderSection() {
   );
 }
 
-// ─── SaaS Agent Tab ───────────────────────────────────────────────────────────
+// ─── Wallet Tab ───────────────────────────────────────────────────────────────
+
+function WalletTab() {
+  const { authenticated, login, getAccessToken } = usePrivy();
+  const { wallets } = useWallets();
+
+  const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
+  const externalWallet = wallets.find((w) => w.walletClientType !== "privy");
+  const activeWallet = embeddedWallet ?? externalWallet;
+  const address = activeWallet?.address;
+
+  const { data: mntBalance, isLoading: mntLoading, refetch: refetchMnt } = useBalance({
+    address: address as `0x${string}` | undefined,
+    chainId: mantleSepolia.id,
+    query: { enabled: !!address },
+  });
+
+  const { data: usdcBalance, isLoading: usdcLoading, refetch: refetchUsdc } = useBalance({
+    address: address as `0x${string}` | undefined,
+    chainId: mantleSepolia.id,
+    token: "0x2c852e740B62308c46DD29B982FBb650D063Bd07",
+    query: { enabled: !!address },
+  });
+
+  const [copied, setCopied] = useState(false);
+  const [sendTo, setSendTo] = useState("");
+  const [sendAmount, setSendAmount] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sendTx, setSendTx] = useState<string | null>(null);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [showSend, setShowSend] = useState(false);
+  const [txHistory, setTxHistory] = useState<{ hash: string; type: string; amount: string; time: string }[]>([]);
+
+  const copyAddress = () => {
+    if (!address) return;
+    navigator.clipboard.writeText(address);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const refetch = () => {
+    refetchMnt();
+    refetchUsdc();
+  };
+
+  const sendMNT = async () => {
+    if (!embeddedWallet || !sendTo || !sendAmount) return;
+    setSending(true);
+    setSendError(null);
+    setSendTx(null);
+    try {
+      await embeddedWallet.switchChain(mantleSepolia.id);
+      const provider = await embeddedWallet.getEthereumProvider();
+      const valueHex = "0x" + parseUnits(sendAmount, 18).toString(16);
+      const hash = await provider.request({
+        method: "eth_sendTransaction",
+        params: [{
+          from: embeddedWallet.address,
+          to: sendTo as `0x${string}`,
+          value: valueHex,
+          chainId: "0x138B",
+        }],
+      });
+      setSendTx(hash as string);
+      setTxHistory((prev) => [{
+        hash: hash as string,
+        type: "Send MNT",
+        amount: `${sendAmount} MNT`,
+        time: new Date().toISOString(),
+      }, ...prev]);
+      setSendTo("");
+      setSendAmount("");
+      setTimeout(refetch, 3000);
+    } catch (e: any) {
+      setSendError(e.message ?? "Transaction failed");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  if (!authenticated) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[400px] gap-4 text-center">
+        <Wallet className="w-8 h-8 text-muted-foreground" />
+        <div>
+          <p className="font-mono text-sm font-medium">Sign in to view wallet</p>
+          <p className="text-muted-foreground text-xs mt-1">Your embedded wallet is created automatically</p>
+        </div>
+        <Button onClick={login} className="font-mono text-xs uppercase tracking-wider">
+          Sign In
+        </Button>
+      </div>
+    );
+  }
+
+  const mntFormatted = mntBalance
+    ? parseFloat(formatUnits(mntBalance.value, 18)).toFixed(4)
+    : "0.0000";
+
+  const usdcFormatted = usdcBalance
+    ? parseFloat(formatUnits(usdcBalance.value, 6)).toFixed(2)
+    : "0.00";
+
+  return (
+    <div className="w-full max-w-2xl mx-auto space-y-4">
+
+      {/* Address card */}
+      <div className="bg-card border border-border/50 rounded-xl p-5 space-y-4">
+        <div className="flex items-center justify-between">
+          <p className="text-xs font-mono text-muted-foreground uppercase tracking-widest">Wallet Address</p>
+          <div className="flex items-center gap-1">
+            <span className="text-[10px] font-mono text-primary bg-primary/10 border border-primary/20 px-2 py-0.5 rounded">
+              Mantle Sepolia
+            </span>
+            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={refetch}>
+              <RefreshCw className="w-3 h-3 text-muted-foreground" />
+            </Button>
+          </div>
+        </div>
+
+        {address ? (
+          <div
+            className="flex items-center justify-between bg-background/50 border border-border/40 rounded-lg px-3 py-2.5 cursor-pointer hover:border-primary/40 transition-colors group"
+            onClick={copyAddress}
+          >
+            <span className="font-mono text-sm text-foreground break-all">{address}</span>
+            <div className="ml-3 shrink-0">
+              {copied
+                ? <CheckCircle2 className="w-4 h-4 text-green-400" />
+                : <Copy className="w-4 h-4 text-muted-foreground group-hover:text-primary transition-colors" />
+              }
+            </div>
+          </div>
+        ) : (
+          <div className="h-10 bg-muted/30 rounded-lg animate-pulse" />
+        )}
+
+        {/* Get testnet MNT */}
+        
+          href="https://faucet.testnet.mantle.xyz"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-xs font-mono text-primary/70 hover:text-primary flex items-center gap-1 transition-colors"
+        >
+          <ExternalLink className="w-3 h-3" />
+          Get testnet MNT from faucet →
+        </a>
+      </div>
+
+      {/* Balances */}
+      <div className="grid grid-cols-2 gap-3">
+        <div className="bg-card border border-border/50 rounded-xl p-4 space-y-1">
+          <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">MNT Balance</p>
+          {mntLoading
+            ? <div className="h-7 w-24 bg-muted/40 rounded animate-pulse" />
+            : <p className="text-2xl font-mono font-semibold">{mntFormatted}</p>
+          }
+          <p className="text-[10px] text-muted-foreground font-mono">Native gas token</p>
+        </div>
+
+        <div className="bg-card border border-border/50 rounded-xl p-4 space-y-1">
+          <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">USDC Balance</p>
+          {usdcLoading
+            ? <div className="h-7 w-24 bg-muted/40 rounded animate-pulse" />
+            : <p className="text-2xl font-mono font-semibold">{usdcFormatted}</p>
+          }
+          <p className="text-[10px] text-muted-foreground font-mono">Payment stablecoin</p>
+        </div>
+      </div>
+
+      {/* Actions */}
+      <div className="grid grid-cols-3 gap-2">
+        <Button
+          variant="outline"
+          className="flex flex-col h-16 gap-1 font-mono text-xs border-border/50"
+          onClick={() => {
+            window.open("https://faucet.testnet.mantle.xyz", "_blank");
+          }}
+        >
+          <ArrowDownLeft className="w-4 h-4 text-green-400" />
+          Fund
+        </Button>
+        <Button
+          variant="outline"
+          className="flex flex-col h-16 gap-1 font-mono text-xs border-border/50"
+          onClick={() => setShowSend(!showSend)}
+        >
+          <Send className="w-4 h-4 text-primary" />
+          Send
+        </Button>
+        <Button
+          variant="outline"
+          className="flex flex-col h-16 gap-1 font-mono text-xs border-border/50"
+          onClick={() => window.open(`https://explorer.sepolia.mantle.xyz/address/${address}`, "_blank")}
+        >
+          <ExternalLink className="w-4 h-4 text-blue-400" />
+          Explorer
+        </Button>
+      </div>
+
+      {/* Send panel */}
+      {showSend && (
+        <div className="bg-card border border-border/50 rounded-xl p-4 space-y-3">
+          <p className="text-xs font-mono text-muted-foreground uppercase tracking-widest">Send MNT</p>
+          {!embeddedWallet && (
+            <p className="text-xs text-yellow-400 font-mono bg-yellow-500/10 border border-yellow-500/30 rounded-lg px-3 py-2">
+              Sign in with email to use embedded wallet for sending
+            </p>
+          )}
+          <Input
+            placeholder="Recipient address (0x...)"
+            value={sendTo}
+            onChange={(e) => setSendTo(e.target.value)}
+            className="font-mono text-sm bg-background/50 border-border/60"
+            disabled={!embeddedWallet}
+          />
+          <Input
+            placeholder="Amount (MNT)"
+            type="number"
+            value={sendAmount}
+            onChange={(e) => setSendAmount(e.target.value)}
+            className="font-mono text-sm bg-background/50 border-border/60"
+            disabled={!embeddedWallet}
+          />
+          <Button
+            className="w-full font-mono uppercase tracking-wider text-xs"
+            onClick={sendMNT}
+            disabled={sending || !sendTo || !sendAmount || !embeddedWallet}
+          >
+            {sending
+              ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Broadcasting...</>
+              : <><Send className="w-4 h-4 mr-2" />Send on Mantle</>
+            }
+          </Button>
+          {sendTx && (
+            <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg space-y-1">
+              <p className="text-green-400 font-mono text-xs font-medium flex items-center gap-1">
+                <CheckCircle2 className="w-3 h-3" /> Transaction sent
+              </p>
+              
+                href={`https://explorer.sepolia.mantle.xyz/tx/${sendTx}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs font-mono text-primary hover:underline break-all block"
+              >
+                {sendTx}
+              </a>
+            </div>
+          )}
+          {sendError && (
+            <p className="text-xs font-mono text-destructive bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2">
+              {sendError}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Recent transactions (from this session + Mantle explorer link) */}
+      {txHistory.length > 0 && (
+        <div className="bg-card border border-border/50 rounded-xl p-4 space-y-3">
+          <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">This Session</p>
+          {txHistory.map((tx) => (
+            <div key={tx.hash} className="flex items-center justify-between text-sm">
+              <div className="flex items-center gap-2">
+                <ArrowUpRight className="w-3.5 h-3.5 text-primary shrink-0" />
+                <div>
+                  <p className="font-mono text-xs">{tx.type}</p>
+                  <p className="font-mono text-[10px] text-muted-foreground">{timeAgo(tx.time)}</p>
+                </div>
+              </div>
+              <div className="text-right">
+                <p className="font-mono text-xs">{tx.amount}</p>
+                
+                  href={`https://explorer.sepolia.mantle.xyz/tx/${tx.hash}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[10px] font-mono text-primary/70 hover:text-primary flex items-center gap-0.5 justify-end"
+                >
+                  <ExternalLink className="w-2.5 h-2.5" />
+                  {tx.hash.slice(0, 8)}...
+                </a>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Full history on explorer */}
+      {address && (
+        
+          href={`https://explorer.sepolia.mantle.xyz/address/${address}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center justify-center gap-2 text-xs font-mono text-muted-foreground hover:text-primary transition-colors py-2"
+        >
+          <ExternalLink className="w-3 h-3" />
+          View full transaction history on Mantle Explorer
+        </a>
+      )}
+    </div>
+  );
+}
+
+// ─── Agent Tab ───────────────────────────────────────────────────────────
 
 function SaasAgentTab() {
   const { authenticated } = usePrivy();
@@ -621,9 +922,16 @@ function Home() {
       </header>
 
       <main className="flex-1 w-full max-w-4xl mx-auto px-4 py-8 md:py-12 flex flex-col">
-        <Tabs defaultValue="physical" className="w-full">
+        <Tabs defaultValue="wallet" className="w-full">
           <div className="flex justify-center mb-8">
             <TabsList className="bg-muted/50 p-1 border border-border/50 rounded-md">
+              <TabsTrigger
+                value="wallet"
+                className="font-mono text-sm px-5 data-[state=active]:bg-card data-[state=active]:text-primary data-[state=active]:shadow-sm transition-all rounded"
+              >
+                <Wallet className="w-3.5 h-3.5 mr-1.5" />
+                Wallet
+              </TabsTrigger>
               <TabsTrigger
                 value="physical"
                 className="font-mono text-sm px-5 data-[state=active]:bg-card data-[state=active]:text-primary data-[state=active]:shadow-sm transition-all rounded"
@@ -634,7 +942,7 @@ function Home() {
                 value="saas"
                 className="font-mono text-sm px-5 data-[state=active]:bg-card data-[state=active]:text-primary data-[state=active]:shadow-sm transition-all rounded"
               >
-                SaaS Auto-Pay
+                Auto-Pay
               </TabsTrigger>
               <TabsTrigger
                 value="history"
@@ -646,13 +954,18 @@ function Home() {
             </TabsList>
           </div>
 
+          {/* ── Wallet ────────────────────────────────────────────────── */}
+          <TabsContent value="wallet" className="m-0 p-0 outline-none flex justify-center">
+            <WalletTab />
+          </TabsContent>
+
           {/* ── Physical Checkout ─────────────────────────────────────── */}
           <TabsContent value="physical" className="grid grid-cols-1 lg:grid-cols-12 gap-8 m-0 p-0 outline-none">
             <div className="lg:col-span-5 flex flex-col gap-6">
               <div>
                 <h2 className="text-2xl font-semibold tracking-tight">Generate Route</h2>
                 <p className="text-muted-foreground text-sm mt-1">
-                  AI routes your payment through the optimal rail — stablecoin, virtual card, or P2P — bypassing BIN filters automatically.
+                  AI routes your payment through the optimal rail — stablecoin, virtual card, or P2P.
                 </p>
               </div>
 
@@ -766,43 +1079,6 @@ function Home() {
                       <p className="text-xs opacity-50 font-mono mt-1">via {routingResult.processor}</p>
                     </div>
 
-                    {/* Billing address */}
-                    {routingResult.mock_billing_address && (
-                      <div className="bg-card border border-border/50 rounded-lg p-3 flex justify-between items-center group hover:border-primary/30 transition-colors">
-                        <div className="space-y-1 overflow-hidden">
-                          <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">Use This Billing Address</div>
-                          <div className="font-mono text-xs text-foreground">
-                            {routingResult.mock_billing_address.street}, {routingResult.mock_billing_address.city}, {routingResult.mock_billing_address.state} {routingResult.mock_billing_address.zip}
-                          </div>
-                        </div>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-muted-foreground group-hover:text-primary transition-colors shrink-0"
-                          onClick={() => {
-                            const a = routingResult.mock_billing_address!;
-                            navigator.clipboard.writeText(`${a.street}, ${a.city}, ${a.state} ${a.zip}`);
-                          }}
-                        >
-                          <Copy className="w-4 h-4" />
-                        </Button>
-                      </div>
-                    )}
-
-                    {/* Fallback rails */}
-                    {routingResult.fallback_rails.length > 0 && (
-                      <div className="p-3 bg-card border border-border/50 rounded-lg">
-                        <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest mb-2">Fallback Rails</p>
-                        <div className="flex flex-wrap gap-1.5">
-                          {routingResult.fallback_rails.map((r) => (
-                            <span key={r} className="text-xs font-mono text-muted-foreground bg-muted/50 px-2 py-0.5 rounded">
-                              {RAIL_LABELS[r] ?? r}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
                     {/* Execute button */}
                     {!txHash && !virtualCard && (
                       <>
@@ -897,7 +1173,7 @@ function Home() {
             </div>
           </TabsContent>
 
-          {/* ── SaaS Agent ────────────────────────────────────────────── */}
+          {/* ── Agent ────────────────────────────────────────────── */}
           <TabsContent value="saas" className="m-0 p-0 outline-none flex justify-center">
             <SaasAgentTab />
           </TabsContent>

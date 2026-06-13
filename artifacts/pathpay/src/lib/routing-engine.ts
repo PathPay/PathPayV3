@@ -1,55 +1,46 @@
-import { z } from "zod";
+export type ImmersveCard = {
+  status: 'sandbox_pending' | 'issued' | 'error';
+  sandbox_card?: {
+    number: string;
+    expiry: string;
+    cvv: string;
+    network: string;
+    bin_country: string;
+    funded_by: string;
+  };
+  card_application_id?: string;
+  message?: string;
+};
 
-export const RoutingDecisionSchema = z.object({
-  recommended_rail: z.enum([
-    "stablecoin_direct",
-    "virtual_card_stripe",
-    "virtual_card_lithic",
-    "p2p_corridor",
-  ]),
-  processor: z.string(),
-  reason: z.string(),
-  confidence: z.number().min(0).max(1),
-  merchant_accepts_crypto: z.boolean(),
-  suggested_stablecoin: z.enum(["USDC", "USDT", "DAI"]).nullable(),
-  virtual_card_bin_region: z.string().nullable(),
-  mock_billing_address: z
-    .object({
-      street: z.string(),
-      city: z.string(),
-      state: z.string(),
-      zip: z.string(),
-      country: z.string(),
-    })
-    .nullable(),
-  fallback_rails: z.array(z.string()),
-});
-
-export type RoutingDecision = z.infer<typeof RoutingDecisionSchema>;
-
-export type RoutingDecisionWithId = RoutingDecision & {
+export type RoutingDecision = {
+  recommended_rail: 'immersve_card' | 'stablecoin_direct' | 'p2p_corridor';
+  processor: string;
+  reason: string;
+  confidence: number;
+  merchant_accepts_crypto: boolean;
+  merchant_category: 'physical_goods' | 'saas' | 'crypto_native' | 'marketplace';
+  bin_risk: 'high' | 'medium' | 'low';
+  bin_risk_reason: string;
+  suggested_stablecoin: 'USDC' | 'USDT' | 'DAI' | null;
+  fallback_rails: string[];
+  card?: ImmersveCard;
   routing_id?: string;
 };
 
 export async function getRoutingDecision(
   merchantUrl: string,
   amount: string,
-  userCountry: string = "NG",
-  authToken?: string | null,
-): Promise<RoutingDecisionWithId> {
-  const response = await fetch("/api/route", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+  userCountry: string = 'NG',
+  authToken: string | null = null
+): Promise<RoutingDecision> {
+  const res = await fetch('/api/route', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ merchantUrl, amount, userCountry, authToken }),
   });
-
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({ error: "Routing engine failed" }));
-    throw new Error((err as { error?: string }).error ?? "Routing engine failed");
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as { error?: string }).error ?? 'Routing failed');
   }
-
-  const data = await response.json();
-  const { routing_id, ...rest } = data as RoutingDecisionWithId;
-  const validated = RoutingDecisionSchema.parse(rest);
-  return { ...validated, routing_id };
+  return res.json();
 }

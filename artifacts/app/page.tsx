@@ -2,29 +2,34 @@
 
 import { useState } from 'react';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
-import { useSendTransaction } from 'wagmi';
 import { parseUnits } from 'viem';
 import { getRoutingDecision, RoutingDecision } from '../lib/routing-engine';
 import { mantleSepolia } from '../lib/chains';
 
 const RAIL_LABELS: Record<string, string> = {
+  immersve_card: '💳 Real Mastercard (Immersve + USDC)',
   stablecoin_direct: '⚡ Stablecoin Direct (Mantle)',
-  virtual_card_stripe: '💳 Virtual Card (Stripe BIN)',
-  virtual_card_lithic: '💳 Virtual Card (Lithic BIN)',
-  p2p_corridor: '🔄 P2P Corridor',
 };
 
 const RAIL_COLORS: Record<string, string> = {
   stablecoin_direct: 'text-green-400 border-green-500/30 bg-green-500/10',
   virtual_card_stripe: 'text-blue-400 border-blue-500/30 bg-blue-500/10',
   virtual_card_lithic: 'text-purple-400 border-purple-500/30 bg-purple-500/10',
+  immersve_virtual_card: 'text-purple-400 border-purple-500/30 bg-purple-500/10',
   p2p_corridor: 'text-yellow-400 border-yellow-500/30 bg-yellow-500/10',
+};
+
+const CARD_STEP_LABELS: Record<string, string> = {
+  idle: '',
+  funding: 'Getting deposit address...',
+  waiting: 'Confirming USDC on-chain...',
+  issuing: 'Issuing Mastercard...',
+  done: '',
 };
 
 export default function Dashboard() {
   const { login, logout, authenticated, user, getAccessToken } = usePrivy();
   const { wallets } = useWallets();
-  const { sendTransactionAsync } = useSendTransaction();
 
   const [tab, setTab] = useState<'copilot' | 'agent'>('copilot');
   const [merchantUrl, setMerchantUrl] = useState('');
@@ -33,7 +38,11 @@ export default function Dashboard() {
   const [decision, setDecision] = useState<RoutingDecision | null>(null);
   const [txHash, setTxHash] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [agentMessages, setAgentMessages] = useState<{role: string; content: string}[]>([]);
+  const [cardStep, setCardStep] = useState<'idle' | 'funding' | 'waiting' | 'issuing' | 'done'>('idle');
+  const [issuedCard, setIssuedCard] = useState<{
+    number: string; expiry: string; cvv: string; type: string; billingName: string;
+  } | null>(null);
+  const [agentMessages, setAgentMessages] = useState<{ role: string; content: string }[]>([]);
   const [agentInput, setAgentInput] = useState('');
   const [agentLoading, setAgentLoading] = useState(false);
 
@@ -46,11 +55,13 @@ export default function Dashboard() {
     setDecision(null);
     setError(null);
     setTxHash(null);
+    setIssuedCard(null);
+    setCardStep('idle');
 
     try {
       const result = await getRoutingDecision(merchantUrl, amount);
       setDecision(result);
-    } catch (e) {
+    } catch {
       setError('Routing analysis failed. Check your API key.');
     } finally {
       setLoading(false);
@@ -61,48 +72,92 @@ export default function Dashboard() {
     if (!decision || !authenticated) return;
     setLoading(true);
     setError(null);
+    setIssuedCard(null);
+    setTxHash(null);
 
     try {
+      const token = await getAccessToken();
+
+      // --- STABLECOIN DIRECT ---
       if (decision.recommended_rail === 'stablecoin_direct') {
-        // Real on-chain tx via Privy embedded wallet on Mantle Sepolia
-        const wallet = embeddedWallet;
-        if (!wallet) throw new Error('No embedded wallet found');
+        if (!embeddedWallet) throw new Error('No embedded wallet found');
+        await embeddedWallet.switchChain(mantleSepolia.id);
+        const provider = await embeddedWallet.getEthereumProvider();
 
-        await wallet.switchChain(mantleSepolia.id);
-        const provider = await wallet.getEthereumProvider();
-
-        const amountWei = parseUnits(amount, 6); // USDC 6 decimals
-        // For testnet demo: send MNT native token to a test address
         const hash = await provider.request({
           method: 'eth_sendTransaction',
           params: [{
-            from: wallet.address,
-            to: '0x000000000000000000000000000000000000dEaD', // testnet burn addr
-            value: '0x' + parseUnits('0.001', 18).toString(16), // tiny MNT amount
-            chainId: '0x138B', // 5003 hex
+            from: embeddedWallet.address,
+            to: '0x000000000000000000000000000000000000dEaD',
+            value: '0x' + parseUnits('0.001', 18).toString(16),
+            chainId: '0x138B',
           }],
         });
         setTxHash(hash as string);
-      } else {
-        // Virtual card flow — call execute-payment API
-        const token = await getAccessToken();
-        const res = await fetch('/api/execute-payment', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            privyToken: token,
-            toAddress: '0x000000000000000000000000000000000000dEaD',
-            amount,
-            rail: decision.recommended_rail,
-          }),
-        });
-        const data = await res.json();
-        if (data.card) {
-          setTxHash(`CARD:${JSON.stringify(data.card)}`);
-        }
+        return;
       }
+
+      // --- VIRTUAL CARD VIA IMMERSVE ---
+      // Step 1: Onboard user to Supabase
+      await fetch('/api/onboard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ privyToken: token, walletAddress, email: user?.email?.address }),
+      });
+
+      // Step 2: Create Immersve cardholder + funding source (idempotent)
+      await fetch('/api/card/issue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ privyToken: token, action: 'setup' }),
+      });
+
+      // Step 3: Get USDC deposit address from Immersve
+      setCardStep('funding');
+      const fundRes = await fetch('/api/card/issue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ privyToken: token, action: 'fund', amountUsdc: parseFloat(amount) }),
+      });
+      const fundData = await fundRes.json();
+      if (!fundData.depositAddress) throw new Error('Failed to get deposit address');
+
+      // Step 4: Send USDC on Mantle to Immersve deposit address
+      if (!embeddedWallet) throw new Error('No embedded wallet found');
+      await embeddedWallet.switchChain(mantleSepolia.id);
+      const provider = await embeddedWallet.getEthereumProvider();
+
+      const USDC_CONTRACT = '0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9';
+      const amountHex = parseUnits(amount, 6).toString(16).padStart(64, '0');
+      const toHex = fundData.depositAddress.slice(2).padStart(64, '0');
+      const transferData = `0xa9059cbb${toHex}${amountHex}`;
+
+      const hash = await provider.request({
+        method: 'eth_sendTransaction',
+        params: [{ from: embeddedWallet.address, to: USDC_CONTRACT, data: transferData }],
+      });
+      setTxHash(hash as string);
+
+      // Step 5: Wait for on-chain confirmation (webhook in prod, 15s timeout for demo)
+      setCardStep('waiting');
+      await new Promise(r => setTimeout(r, 15000));
+
+      // Step 6: Issue the Mastercard virtual card
+      setCardStep('issuing');
+      const issueRes = await fetch('/api/card/issue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ privyToken: token, action: 'issue', amountUsdc: parseFloat(amount), merchantUrl }),
+      });
+      const issueData = await issueRes.json();
+      if (!issueData.card) throw new Error(issueData.error || 'Card issuance failed');
+
+      setIssuedCard(issueData.card);
+      setCardStep('done');
+
     } catch (e: any) {
-      setError(e.message || 'Transaction failed');
+      setError(e.message || 'Payment failed');
+      setCardStep('idle');
     } finally {
       setLoading(false);
     }
@@ -130,11 +185,17 @@ export default function Dashboard() {
     }
   }
 
-  const cardData = txHash?.startsWith('CARD:') ? JSON.parse(txHash.slice(5)) : null;
+  const isCardRail = decision && decision.recommended_rail !== 'stablecoin_direct';
+  const payButtonLabel = () => {
+    if (loading && cardStep !== 'idle') return CARD_STEP_LABELS[cardStep];
+    if (loading) return 'Processing...';
+    if (!decision) return 'Find Best Route First';
+    if (decision.recommended_rail === 'stablecoin_direct') return '⚡ Pay on Mantle';
+    return '💳 Generate Virtual Card';
+  };
 
   return (
     <div className="min-h-screen bg-gray-950 text-white">
-      {/* Header */}
       <header className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-sm">P</div>
@@ -168,7 +229,6 @@ export default function Dashboard() {
         </div>
       ) : (
         <main className="max-w-2xl mx-auto px-4 py-8">
-          {/* Tabs */}
           <div className="flex gap-1 bg-gray-900 p-1 rounded-xl mb-8">
             {(['copilot', 'agent'] as const).map(t => (
               <button
@@ -190,7 +250,7 @@ export default function Dashboard() {
                 <input
                   value={merchantUrl}
                   onChange={e => setMerchantUrl(e.target.value)}
-                  placeholder="https://vercel.com/pricing"
+                  placeholder="https://apple.com/shop"
                   className="w-full bg-gray-900 border border-gray-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-indigo-500 transition-colors"
                 />
               </div>
@@ -199,17 +259,18 @@ export default function Dashboard() {
                 <input
                   value={amount}
                   onChange={e => setAmount(e.target.value)}
-                  placeholder="20"
+                  placeholder="299"
                   type="number"
                   className="w-full bg-gray-900 border border-gray-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-indigo-500 transition-colors"
                 />
               </div>
+
               <button
                 onClick={handleAnalyze}
                 disabled={loading || !merchantUrl || !amount}
                 className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl font-medium text-sm transition-colors"
               >
-                {loading ? 'Analyzing payment routes...' : 'Find Best Route'}
+                {loading && !decision ? 'Analyzing payment routes...' : 'Find Best Route'}
               </button>
 
               {error && (
@@ -220,7 +281,6 @@ export default function Dashboard() {
 
               {decision && (
                 <div className="space-y-3 mt-2">
-                  {/* Primary recommendation */}
                   <div className={`p-4 rounded-xl border ${RAIL_COLORS[decision.recommended_rail]}`}>
                     <div className="flex items-center justify-between mb-2">
                       <span className="font-semibold text-sm">{RAIL_LABELS[decision.recommended_rail]}</span>
@@ -230,10 +290,9 @@ export default function Dashboard() {
                     <p className="text-xs opacity-60">via {decision.processor}</p>
                   </div>
 
-                  {/* Virtual card details */}
-                  {decision.virtual_card_bin_region && decision.mock_billing_address && (
+                  {decision.mock_billing_address && (
                     <div className="p-4 bg-gray-900 border border-gray-800 rounded-xl">
-                      <p className="text-xs text-gray-400 mb-2 font-medium">Use this billing address at checkout:</p>
+                      <p className="text-xs text-gray-400 mb-2 font-medium">Billing address for checkout:</p>
                       <div className="text-sm font-mono space-y-0.5">
                         <p>{decision.mock_billing_address.street}</p>
                         <p>{decision.mock_billing_address.city}, {decision.mock_billing_address.state} {decision.mock_billing_address.zip}</p>
@@ -242,10 +301,9 @@ export default function Dashboard() {
                     </div>
                   )}
 
-                  {/* Fallback rails */}
                   {decision.fallback_rails.length > 0 && (
                     <div className="p-3 bg-gray-900 border border-gray-800 rounded-xl">
-                      <p className="text-xs text-gray-500 mb-1.5">Fallback options:</p>
+                      <p className="text-xs text-gray-500 mb-1.5">Fallbacks:</p>
                       <div className="flex flex-wrap gap-2">
                         {decision.fallback_rails.map(r => (
                           <span key={r} className="text-xs text-gray-400 bg-gray-800 px-2 py-1 rounded-md">{r}</span>
@@ -254,16 +312,31 @@ export default function Dashboard() {
                     </div>
                   )}
 
+                  {/* Progress indicator for card issuance */}
+                  {loading && cardStep !== 'idle' && (
+                    <div className="p-3 bg-gray-900 border border-gray-800 rounded-xl">
+                      <div className="flex items-center gap-2">
+                        <div className="w-3 h-3 rounded-full bg-indigo-500 animate-pulse" />
+                        <span className="text-xs text-gray-400">{CARD_STEP_LABELS[cardStep]}</span>
+                      </div>
+                      <div className="mt-2 h-1 bg-gray-800 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-indigo-500 rounded-full transition-all duration-500"
+                          style={{ width: cardStep === 'funding' ? '25%' : cardStep === 'waiting' ? '60%' : cardStep === 'issuing' ? '85%' : '100%' }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
                   <button
                     onClick={handleExecutePayment}
                     disabled={loading}
-                    className="w-full py-3 bg-green-600 hover:bg-green-500 disabled:opacity-40 rounded-xl font-medium text-sm transition-colors"
+                    className="w-full py-3 bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl font-medium text-sm transition-colors"
                   >
-                    {loading ? 'Executing...' : decision.recommended_rail === 'stablecoin_direct' ? '⚡ Pay on Mantle' : '💳 Generate Virtual Card'}
+                    {payButtonLabel()}
                   </button>
 
-                  {/* TX result */}
-                  {txHash && !cardData && (
+                  {txHash && !issuedCard && (
                     <div className="p-4 bg-green-500/10 border border-green-500/30 rounded-xl">
                       <p className="text-green-400 text-sm font-medium mb-1">Transaction sent ✓</p>
 
@@ -277,17 +350,45 @@ export default function Dashboard() {
                     </div>
                   )}
 
-                  {cardData && (
-                    <div className="p-4 bg-gradient-to-br from-indigo-900/40 to-purple-900/40 border border-indigo-500/30 rounded-xl">
-                      <p className="text-sm font-medium mb-3 text-indigo-300">Virtual Card Generated</p>
-                      <div className="font-mono text-sm space-y-1">
-                        <p className="text-lg tracking-widest">{cardData.number}</p>
-                        <div className="flex gap-4 text-gray-400 text-xs">
-                          <span>EXP {cardData.expiry}</span>
-                          <span>CVV {cardData.cvv}</span>
+                  {issuedCard && (
+                    <div className="space-y-3">
+                      {txHash && (
+                        <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-xl">
+                          <p className="text-green-400 text-xs font-medium mb-1">USDC locked on Mantle ✓</p>
+
+                            href={`https://explorer.sepolia.mantle.xyz/tx/${txHash}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-indigo-400 hover:underline font-mono break-all"
+                          >
+                            {txHash}
+                          </a>
                         </div>
-                        <p className="text-gray-400 text-xs">{cardData.billing_name}</p>
+                      )}
+                      <div className="p-5 bg-gradient-to-br from-gray-900 to-indigo-950 border border-indigo-500/30 rounded-2xl">
+                        <div className="flex items-center justify-between mb-4">
+                          <span className="text-xs text-gray-400 font-medium">VIRTUAL CARD</span>
+                          <span className="text-xs text-gray-300 font-bold">{issuedCard.type}</span>
+                        </div>
+                        <p className="text-xl font-mono tracking-widest mb-4">{issuedCard.number}</p>
+                        <div className="flex items-end justify-between">
+                          <div>
+                            <p className="text-xs text-gray-500 mb-0.5">CARDHOLDER</p>
+                            <p className="text-sm font-mono">{issuedCard.billingName}</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-xs text-gray-500 mb-0.5">EXPIRES</p>
+                            <p className="text-sm font-mono">{issuedCard.expiry}</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-xs text-gray-500 mb-0.5">CVV</p>
+                            <p className="text-sm font-mono">{issuedCard.cvv}</p>
+                          </div>
+                        </div>
                       </div>
+                      <p className="text-xs text-gray-500 text-center">
+                        Copy these details into the merchant checkout. Card is locked to {merchantUrl ? new URL(merchantUrl).hostname : 'this merchant'}.
+                      </p>
                     </div>
                   )}
                 </div>
@@ -316,9 +417,7 @@ export default function Dashboard() {
                 {agentMessages.map((m, i) => (
                   <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                     <div className={`max-w-xs px-3 py-2 rounded-xl text-sm ${
-                      m.role === 'user'
-                        ? 'bg-indigo-600 text-white'
-                        : 'bg-gray-800 text-gray-200'
+                      m.role === 'user' ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-200'
                     }`}>
                       {m.content}
                     </div>

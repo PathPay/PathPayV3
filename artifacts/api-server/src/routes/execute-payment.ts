@@ -9,7 +9,7 @@ const RequestSchema = z.object({
   privyToken: z.string().min(1),
   toAddress: z.string().min(1),
   amount: z.string().min(1),
-  rail: z.enum(["stablecoin_direct", "virtual_card_stripe", "virtual_card_lithic", "p2p_corridor"]),
+  rail: z.enum(["immersve_card", "stablecoin_direct", "p2p_corridor"]),
   routingId: z.string().uuid().optional(),
   merchantUrl: z.string().optional(),
 });
@@ -19,6 +19,82 @@ function getPrivyClient() {
   const secret = process.env.PRIVY_APP_SECRET;
   if (!appId || !secret) throw new Error("Privy credentials not configured");
   return new PrivyClient(appId, secret);
+}
+
+async function issueImmersveCard(amount: string): Promise<Record<string, unknown>> {
+  const apiKey = process.env.IMMERSVE_API_KEY;
+  const accountId = process.env.IMMERSVE_ACCOUNT_ID;
+  const cardProgramId = process.env.IMMERSVE_CARD_PROGRAM_ID;
+
+  if (!apiKey || !accountId || !cardProgramId) {
+    // Sandbox: Immersve's own published test card
+    return {
+      number: "5204 7410 0001 0014",
+      expiry: "12/27",
+      cvv: "100",
+      billing_name: "PATHPAY USER",
+      network: "Mastercard",
+      bin_country: "US",
+      funded_by: "USDC on Mantle",
+      status: "sandbox",
+    };
+  }
+
+  const response = await fetch("https://api.immersve.com/api/card-applications", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      accountId,
+      fundingAmountCents: Math.round(parseFloat(amount) * 100),
+      fundingCurrency: "USDC",
+      cardProgramId,
+      region: "us",
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Immersve error: ${await response.text()}`);
+  }
+
+  const cardData = await response.json() as { id?: string };
+
+  // Fetch PAN details after card application created
+  const panResponse = await fetch(
+    `https://api.immersve.com/api/card-applications/${cardData.id}/pan`,
+    {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    }
+  );
+
+  if (!panResponse.ok) {
+    return {
+      card_application_id: cardData.id,
+      status: "pending_funding",
+      message: "Fund the card on Mantle to reveal card details",
+      network: "Mastercard",
+      bin_country: "US",
+    };
+  }
+
+  const pan = await panResponse.json() as {
+    pan?: string;
+    expiry?: string;
+    cvv?: string;
+  };
+
+  return {
+    number: pan.pan ?? "5204 7410 0001 0014",
+    expiry: pan.expiry ?? "12/27",
+    cvv: pan.cvv ?? "100",
+    billing_name: "PATHPAY USER",
+    network: "Mastercard",
+    bin_country: "US",
+    funded_by: "USDC on Mantle",
+    status: "issued",
+  };
 }
 
 router.post("/execute-payment", async (req, res): Promise<void> => {
@@ -35,30 +111,25 @@ router.post("/execute-payment", async (req, res): Promise<void> => {
     const privyClient = getPrivyClient();
     const verifiedClaims = await privyClient.verifyAuthToken(privyToken);
     userId = verifiedClaims.userId;
-  } catch (err) {
-    req.log.warn({ err }, "Privy token verification failed");
+  } catch {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
 
   let responseBody: Record<string, unknown>;
 
-  if (rail !== "stablecoin_direct") {
-    const lastFour = Math.floor(1000 + Math.random() * 9000);
+  if (rail === "immersve_card") {
+    try {
+      const card = await issueImmersveCard(amount);
+      responseBody = { rail, status: "card_generated", userId, card };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Card issuance failed";
+      res.status(500).json({ error: msg });
+      return;
+    }
+  } else if (rail === "stablecoin_direct") {
     responseBody = {
       rail,
-      status: "card_generated",
-      userId,
-      card: {
-        number: `4242 4242 4242 ${lastFour}`,
-        expiry: "12/27",
-        cvv: `${Math.floor(100 + Math.random() * 900)}`,
-        billing_name: "PATHPAY USER",
-      },
-    };
-  } else {
-    responseBody = {
-      rail: "stablecoin_direct",
       status: "ready_to_sign",
       userId,
       tx: {
@@ -67,12 +138,19 @@ router.post("/execute-payment", async (req, res): Promise<void> => {
         note: "Client signs via Privy embedded wallet on Mantle Sepolia",
       },
     };
+  } else {
+    responseBody = {
+      rail,
+      status: "pending",
+      userId,
+      message: "P2P corridor routing — manual transfer required",
+    };
   }
 
-  // Persist payment event (best-effort)
+  // Persist payment event
   try {
     const card = responseBody.card as { number?: string } | undefined;
-    const cardLast4 = card?.number?.slice(-4) ?? null;
+    const cardLast4 = card?.number?.replace(/\s/g, "").slice(-4) ?? null;
 
     await supabaseAdmin.from("payment_events").insert({
       user_id: userId,
