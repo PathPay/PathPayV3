@@ -206,6 +206,7 @@ function WalletTab() {
   const { data: usdcBalance, isLoading: usdcLoading, refetch: refetchUsdc } = useBalance({
     address: address as `0x${string}` | undefined,
     chainId: mantleSepolia.id,
+    // @ts-ignore - ERC20 token balance
     token: "0x2c852e740B62308c46DD29B982FBb650D063Bd07",
     query: { enabled: !!address },
   });
@@ -324,7 +325,7 @@ function WalletTab() {
         )}
 
         {/* Get testnet MNT */}
-        
+          <a
           href="https://faucet.testnet.mantle.xyz"
           target="_blank"
           rel="noopener noreferrer"
@@ -425,7 +426,7 @@ function WalletTab() {
               <p className="text-green-400 font-mono text-xs font-medium flex items-center gap-1">
                 <CheckCircle2 className="w-3 h-3" /> Transaction sent
               </p>
-              
+              <a
                 href={`https://explorer.sepolia.mantle.xyz/tx/${sendTx}`}
                 target="_blank"
                 rel="noopener noreferrer"
@@ -458,7 +459,7 @@ function WalletTab() {
               </div>
               <div className="text-right">
                 <p className="font-mono text-xs">{tx.amount}</p>
-                
+                <a
                   href={`https://explorer.sepolia.mantle.xyz/tx/${tx.hash}`}
                   target="_blank"
                   rel="noopener noreferrer"
@@ -475,7 +476,7 @@ function WalletTab() {
 
       {/* Full history on explorer */}
       {address && (
-        
+          <a
           href={`https://explorer.sepolia.mantle.xyz/address/${address}`}
           target="_blank"
           rel="noopener noreferrer"
@@ -491,7 +492,7 @@ function WalletTab() {
 
 // ─── Agent Tab ───────────────────────────────────────────────────────────
 
-function SaasAgentTab() {
+function AgentTab() {
   const { authenticated } = usePrivy();
   const [messages, setMessages] = useState<AgentMessage[]>([
     { role: "ai", content: "Ready. Tell me which subscription to pay — I'll route it automatically." },
@@ -825,11 +826,7 @@ function Home() {
     appendLine(`> Processor: ${result.processor}`);
     await new Promise((r) => setTimeout(r, 700));
     appendLine(`> Rail: ${RAIL_LABELS[result.recommended_rail]} (${Math.round(result.confidence * 100)}% confidence)`);
-    await new Promise((r) => setTimeout(r, 700));
-    if (result.mock_billing_address) {
-      appendLine(`> Billing: ${result.mock_billing_address.street}, ${result.mock_billing_address.city}, ${result.mock_billing_address.state}`);
-      await new Promise((r) => setTimeout(r, 600));
-    }
+    await new Promise((r) => setTimeout(r, 600));
     appendLine(`> Route established. Ready to execute.`);
 
     setRoutingResult(result);
@@ -1167,15 +1164,11 @@ function Home() {
                         {routingError}
                       </div>
                     )}
-                  </>
-                )}
-              </div>
-            </div>
-          </TabsContent>
+                  </TabsContent>
 
           {/* ── Agent ────────────────────────────────────────────── */}
           <TabsContent value="saas" className="m-0 p-0 outline-none flex justify-center">
-            <SaasAgentTab />
+            <AgentTab />
           </TabsContent>
 
           {/* ── History ───────────────────────────────────────────────── */}

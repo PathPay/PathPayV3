@@ -1,5 +1,10 @@
 packages:
-  - artifacts/*
+  - artifacts/api-server
+  - artifacts/pathpay
+  - artifacts/app
+  - lib/*
+  - lib/integrations/*
+  - scripts
   - lib/*
   - lib/integrations/*
   - scripts
