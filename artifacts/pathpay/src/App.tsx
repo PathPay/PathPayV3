@@ -1167,7 +1167,7 @@ function Home() {
                   </TabsContent>
 
           {/* ── Agent ────────────────────────────────────────────── */}
-          <TabsContent value="saas" className="m-0 p-0 outline-none flex justify-center">
+              <TabsContent value="saas" className="m-0 p-0 outline-none flex justify-center">
             <AgentTab />
           </TabsContent>
 
@@ -1178,6 +1178,7 @@ function Home() {
         </Tabs>
       </main>
     </div>
+   </TabsContent>
   );
 }
 
