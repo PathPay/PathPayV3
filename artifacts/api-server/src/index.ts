@@ -16,14 +16,11 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-app.listen(port, (err) => {
-  if (err) {
-    logger.error({ err }, "Error listening on port");
-    process.exit(1);
-  }
-
+app.listen(port, () => {
   logger.info({ port }, "Server listening");
 
-  // Best-effort Supabase table check — runs after server is ready
-  ensureTablesExist().catch((e) => logger.warn({ e }, "Supabase init skipped"));
+  // Best-effort Supabase table check
+  ensureTablesExist().catch((e) =>
+    logger.warn({ e }, "Supabase init skipped"),
+  );
 });

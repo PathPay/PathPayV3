@@ -1,5 +1,4 @@
-modules = ["nodejs-24"]
-
+modules = ["nodejs-24", "python-3.11", "nodejs-20"]
 [deployment]
 router = "application"
 deploymentTarget = "autoscale"
@@ -18,3 +17,45 @@ expertMode = true
 [postMerge]
 path = "scripts/post-merge.sh"
 timeoutMs = 20000
+
+[nix]
+packages = ["psmisc", "iproute", "lsof"]
+
+[[ports]]
+localPort = 3000
+externalPort = 3000
+
+[[ports]]
+localPort = 8081
+externalPort = 80
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "API Server"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Frontend"
+
+[[workflows.workflow]]
+name = "API Server"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd artifacts/api-server && PORT=3000 pnpm run dev"
+waitForPort = 3000
+
+[[workflows.workflow]]
+name = "Frontend"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pkill -f vite || true && cd artifacts/pathpay && PORT=3000 BASE_PATH=/ pnpm run dev"
+waitForPort = 3000

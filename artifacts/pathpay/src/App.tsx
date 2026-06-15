@@ -1025,6 +1025,7 @@ function Home() {
             </div>
 
             <div className="lg:col-span-7 flex flex-col gap-4">
+            
               {/* Terminal */}
               <div className="bg-[#0a0a0a] border border-[#1f1f1f] rounded-lg shadow-xl overflow-hidden flex flex-col h-[260px]">
                 <div className="flex items-center px-4 py-2 border-b border-[#1f1f1f] bg-[#0f0f0f]">
@@ -1075,7 +1076,7 @@ function Home() {
                       <p className="text-xs opacity-80 font-mono leading-relaxed">{routingResult.reason}</p>
                       <p className="text-xs opacity-50 font-mono mt-1">via {routingResult.processor}</p>
                     </div>
-
+      
                     {/* Execute button */}
                     {!txHash && !virtualCard && (
                       <>
@@ -1158,13 +1159,16 @@ function Home() {
                       </div>
                     )}
 
-                    {/* Error */}
-                    {routingError && (
-                      <div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg text-destructive text-xs font-mono">
-                        {routingError}
-                      </div>
-                    )}
-                  </TabsContent>
+                {/* Error */}
+                {routingError && (
+                  <div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg text-destructive text-xs font-mono">
+                    {routingError}
+                  </div>
+                )}
+                  </>
+                )}
+                </div>
+                </TabsContent>
 
           {/* ── Agent ────────────────────────────────────────────── */}
               <TabsContent value="saas" className="m-0 p-0 outline-none flex justify-center">
@@ -1178,8 +1182,6 @@ function Home() {
         </Tabs>
       </main>
     </div>
-   </TabsContent>
-  );
 }
 
 // ─── Router & App ─────────────────────────────────────────────────────────────
