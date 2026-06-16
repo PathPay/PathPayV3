@@ -19,9 +19,9 @@ export const arcTestnet = defineChain({
   testnet: true,
 });
 
-export const mantleTestnet = defineChain({
+export const mantleSepolia = defineChain({
   id: 5003,
-  name: "Mantle Testnet",
+  name: "Mantle Sepolia",
   nativeCurrency: {
     name: "MNT",
     symbol: "MNT",
@@ -40,10 +40,10 @@ export const mantleTestnet = defineChain({
 });
 
 export const wagmiConfig = createConfig({
-  chains: [arcTestnet, mantleTestnet],
+  chains: [arcTestnet, mantleSepolia],
   connectors: [injected()],
   transports: {
     [arcTestnet.id]: http(),
-    [mantleTestnet.id]: http(),
+    [mantleSepolia.id]: http(),
   },
 });

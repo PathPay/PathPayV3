@@ -3,7 +3,9 @@ import { logger } from "./lib/logger";
 import { ensureTablesExist } from "./lib/supabase";
 
 const port = Number(
-  process.env.API_PORT ?? 3000,
+  process.env.API_PORT ??
+  process.env.PORT ??
+  3000,
 );
 
 if (

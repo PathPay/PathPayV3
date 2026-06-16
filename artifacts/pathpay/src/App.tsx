@@ -1220,11 +1220,11 @@ function App() {
       <WagmiProvider config={wagmiConfig}>
         <QueryClientProvider client={queryClient}>
           <TooltipProvider>
-                <WouterRouter
-                  base={(import.meta.env.BASE_URL ?? "/").replace(/\/$/, "")}
-                />
-              <AppRouter />
-            </WouterRouter>
+          <WouterRouter
+            base={(import.meta.env.BASE_URL ?? "/").replace(/\/$/, "")}
+            >
+            <AppRouter />
+          </WouterRouter>
             <Toaster />
           </TooltipProvider>
         </QueryClientProvider>

@@ -61,7 +61,7 @@ export async function createFundingSource(
     body: JSON.stringify({
       cardholderId,
       type: "web3",
-      chain: "mantle-sepolia", // mantle for prod
+      chain: "mantleSepolia", // mantle for prod
       walletAddress,
       currency: "USDC",
     }),

@@ -23,7 +23,8 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     port: VITE_PORT,
-
+    allowedHosts: true,
+    
     proxy: {
       "/api": {
         target: `http://localhost:${API_PORT}`,

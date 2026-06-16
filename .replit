@@ -20,7 +20,7 @@ path = "scripts/post-merge.sh"
 timeoutMs = 20000
 
 [nix]
-packages = ["psmisc", "iproute", "lsof"]
+packages = ["psmisc", "iproute", "lsof", "vite"]
 
 [[ports]]
 localPort = 3000
