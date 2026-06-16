@@ -99,7 +99,7 @@ function PrivyHeaderSection() {
   const { ready, authenticated, user, login, logout } = usePrivy();
   const { wallets } = useWallets();
 
-  const wallet = wallets[0];
+  const wallet = wallets?.[0];
   const address = wallet?.address;
   const email = user?.email?.address;
   const phone = user?.phone?.number;
@@ -109,7 +109,7 @@ function PrivyHeaderSection() {
 
   const { data: balance, isLoading: balanceLoading } = useBalance({
     address: address as `0x${string}` | undefined,
-    chainId: mantleTestnet.id,
+    chainId: mantleSepolia.id,
     query: { enabled: !!address },
   });
 
@@ -1199,7 +1199,7 @@ function AppRouter() {
 function App() {
   return (
     <PrivyProvider
-      appId={import.meta.env.PRIVY_APP_ID}
+      appId={import.meta.env.VITE_PRIVY_APP_ID}
       config={{
         loginMethods: ["email", "sms", "google", "twitter", "apple", "wallet"],
         appearance: {
@@ -1220,9 +1220,9 @@ function App() {
       <WagmiProvider config={wagmiConfig}>
         <QueryClientProvider client={queryClient}>
           <TooltipProvider>
-              <WouterRouter
-                base={(import.meta.env.BASE_URL || "").replace(/\/$/, "")}
-                >
+                <WouterRouter
+                  base={(import.meta.env.BASE_URL ?? "/").replace(/\/$/, "")}
+                />
               <AppRouter />
             </WouterRouter>
             <Toaster />

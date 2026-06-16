@@ -2,25 +2,72 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { ensureTablesExist } from "./lib/supabase";
 
-const rawPort = process.env["PORT"];
+const port = Number(
+  process.env.API_PORT ?? 3000,
+);
 
-if (!rawPort) {
+if (
+  !Number.isFinite(port) ||
+  port <= 0 ||
+  port > 65535
+) {
   throw new Error(
-    "PORT environment variable is required but was not provided.",
+    `Invalid API_PORT: "${process.env.API_PORT}"`,
   );
 }
 
-const port = Number(rawPort);
+const server = app.listen(
+  port,
+  "0.0.0.0",
+  async () => {
+    logger.info(
+      {
+        port,
+        env:
+          process.env.NODE_ENV ??
+          "development",
+      },
+      "API server listening",
+    );
 
-if (Number.isNaN(port) || port <= 0) {
-  throw new Error(`Invalid PORT value: "${rawPort}"`);
-}
+    try {
+      await ensureTablesExist();
 
-app.listen(port, () => {
-  logger.info({ port }, "Server listening");
+      logger.info(
+        "Supabase initialization completed",
+      );
+    } catch (error) {
+      logger.warn(
+        { error },
+        "Supabase initialization skipped",
+      );
+    }
+  },
+);
 
-  // Best-effort Supabase table check
-  ensureTablesExist().catch((e) =>
-    logger.warn({ e }, "Supabase init skipped"),
+server.on("error", (error) => {
+  logger.error(
+    { error, port },
+    "Failed to start API server",
   );
+
+  process.exit(1);
+});
+
+process.on("SIGTERM", () => {
+  logger.info("SIGTERM received");
+
+  server.close(() => {
+    logger.info("Server stopped");
+    process.exit(0);
+  });
+});
+
+process.on("SIGINT", () => {
+  logger.info("SIGINT received");
+
+  server.close(() => {
+    logger.info("Server stopped");
+    process.exit(0);
+  });
 });
