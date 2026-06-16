@@ -109,7 +109,7 @@ function PrivyHeaderSection() {
 
   const { data: balance, isLoading: balanceLoading } = useBalance({
     address: address as `0x${string}` | undefined,
-    chainId: arcTestnet.id,
+    chainId: mantleTestnet.id,
     query: { enabled: !!address },
   });
 
@@ -1125,7 +1125,7 @@ function Home() {
                         <div className="relative z-10 flex justify-between items-start">
                           <div className="w-12 h-8 rounded bg-gradient-to-r from-yellow-200/80 to-yellow-500/80 opacity-80" />
                           <div className="flex items-center gap-2">
-                            <span className="font-mono text-sm tracking-widest font-semibold text-white/90">ARC NETWORK</span>
+                            <span className="font-mono text-sm tracking-widest font-semibold text-white/90">PATHPAY</span>
                             <ShieldCheck className="w-5 h-5 text-primary" />
                           </div>
                         </div>
@@ -1167,7 +1167,8 @@ function Home() {
                 )}
                   </>
                 )}
-                </div>
+                </div> {/* routing result wrapper */}
+                </div> {/* lg:col-span-7 */}
                 </TabsContent>
 
           {/* ── Agent ────────────────────────────────────────────── */}
@@ -1182,7 +1183,7 @@ function Home() {
         </Tabs>
       </main>
     </div>
-}
+)}
 
 // ─── Router & App ─────────────────────────────────────────────────────────────
 
@@ -1198,7 +1199,7 @@ function AppRouter() {
 function App() {
   return (
     <PrivyProvider
-      appId={import.meta.env.VITE_PRIVY_APP_ID}
+      appId={import.meta.env.PRIVY_APP_ID}
       config={{
         loginMethods: ["email", "sms", "google", "twitter", "apple", "wallet"],
         appearance: {
@@ -1219,7 +1220,9 @@ function App() {
       <WagmiProvider config={wagmiConfig}>
         <QueryClientProvider client={queryClient}>
           <TooltipProvider>
-            <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+              <WouterRouter
+                base={(import.meta.env.BASE_URL || "").replace(/\/$/, "")}
+                >
               <AppRouter />
             </WouterRouter>
             <Toaster />
