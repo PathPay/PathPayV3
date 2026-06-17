@@ -28,7 +28,7 @@ export const mantleSepolia = defineChain({
     decimals: 18,
   },
   rpcUrls: {
-    default: { http: ["https://rpc.testnet.mantle.xyz"] },
+    default: { http: ["https://rpc.sepolia.mantle.xyz"] },
   },
   blockExplorers: {
     default: {

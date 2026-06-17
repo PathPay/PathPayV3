@@ -134,7 +134,7 @@ function PrivyHeaderSection() {
               <>
                 <span className="font-mono font-medium text-base">{formattedBalance}</span>
                 <Badge variant="outline" className="h-5 px-1.5 text-[10px] font-mono rounded bg-primary/10 text-primary border-primary/20">
-                  ARC NET
+                  Welcome User
                 </Badge>
               </>
             ) : (
@@ -170,7 +170,7 @@ function PrivyHeaderSection() {
         <div className="flex items-center gap-2">
           <span className="font-mono font-medium text-lg text-muted-foreground">—</span>
           <Badge variant="outline" className="h-5 px-1.5 text-[10px] font-mono rounded bg-muted/50 text-muted-foreground border-border/40">
-            ARC NET
+            Welcome User
           </Badge>
         </div>
       </div>

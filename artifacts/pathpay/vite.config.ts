@@ -1,12 +1,13 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
+import tailwindcss from "@tailwindcss/vite";
 
 const API_PORT = Number(process.env.API_PORT ?? 3000);
 const VITE_PORT = Number(process.env.VITE_PORT ?? 5173);
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss(),],
 
   resolve: {
     alias: {
@@ -16,7 +17,8 @@ export default defineConfig({
 
   define: {
     "import.meta.env.VITE_PRIVY_APP_ID": JSON.stringify(
-      process.env.PRIVY_APP_ID ?? ""
+      process.env.PRIVY_APP_ID ??
+      process.env.VITE_PRIVY_APP_ID ??""
     ),
   },
 
